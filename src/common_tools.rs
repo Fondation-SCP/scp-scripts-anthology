@@ -23,10 +23,17 @@ fn wait_for_ratelimit(client: &breqwest::Client, crom_url: &str) {
                             .and_then(|remaining| remaining.as_u64())));
                 match remaining {
                     Some(0) => {
-                        println!("Rate limited by CROM. Waiting 5 minutes.");
+                        println!("Rate limited by Crom. Waiting 5 minutes.");
                         std::thread::sleep(std::time::Duration::from_secs(300));
                     },
-                    None => panic!("Error in the JSON response from CROM: {}", json_res.to_string()),
+                    None => match json_res.get("errors") {
+                        Some(errors) => {
+                            eprintln!("Warning: Crom might be flooded! Waiting 15 seconds.\n{errors}");
+                            std::thread::sleep(std::time::Duration::from_secs(15));
+                            eprintln!("Retrying.");
+                        },
+                        None => panic!("Error in the JSON response from CROM: {}", json_res.to_string()),
+                    }
                     _ => break // Not rate limited
                 }
             }
@@ -57,7 +64,7 @@ pub fn query_crom(request: &String) -> serde_json::Value {
 }
 
 
-fn crom_pages(verbose: &bool, site: String, filter: Option<String>, author: Option<String>, requested_data: String, after: Option<&str>) -> Vec<serde_json::Value> {
+fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<String>, requested_data: String, after: Option<&str>) -> Vec<serde_json::Value> {
     let query = build_crom_query(&site, &filter, &author, &requested_data, &after);
     let response = query_crom(&query);
     if *verbose {
@@ -134,6 +141,6 @@ fn build_crom_query(site: &String, filter: &Option<String>, author: &Option<Stri
     }
 }
 
-pub fn pages(verbose: &bool, site: String, filter: Option<String>, author: Option<String>, requested_data: String) -> Vec<serde_json::Value> {
+pub fn pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<String>, requested_data: String) -> Vec<serde_json::Value> {
     crom_pages(verbose, site, filter, author, requested_data, None)
 }

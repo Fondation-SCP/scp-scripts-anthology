@@ -1,11 +1,11 @@
 use std::env;
 
-mod sourced;
 mod script_data;
 mod common_tools;
 mod list_pages;
 
 use script_data::ScriptData;
+use script_data::OutputFormat;
 
 fn main() {
 
@@ -34,9 +34,10 @@ fn main() {
     let script_data = params.into_iter().fold(
         ScriptData {
             site: "http://fondationscp.wikidot.com/".to_string(),
-            list_all_pages: "system:list-all-pages".to_string(),
             other_args: Vec::new(),
-            verbose: false
+            verbose: false,
+            output_format: OutputFormat::YAML,
+            output_path: None
         },
         |mut script_data, (arg, value)| {
         match arg.as_str() {
@@ -47,11 +48,16 @@ fn main() {
                 br => panic!("Error: unknown branch {br}. Available branches: en, fr, int.")
             }.to_string(),
             "--site" | "-s" => script_data.site = value.to_string(),
-            "--page-list" => script_data.list_all_pages = value.to_string(),
             "--verbose" | "-v" => script_data.verbose = true,
+            "--output" | "-o" => script_data.output_path = Some(value.to_string()),
+            "--output-format" | "-f" => script_data.output_format = match value.to_lowercase().as_str() {
+                "json" => OutputFormat::JSON,
+                "yaml" | "yml" => OutputFormat::YAML,
+                format => panic!("Error: unknown format {format}. Accepted formats: yaml (default), json.")
+            },
             _ => script_data.other_args = script_data.other_args.into_iter().chain(std::iter::once((arg, value))).collect()
         }
-            script_data
+        script_data
     });
 
     match script.as_str() {
@@ -63,6 +69,8 @@ fn main() {
     --branch (-b): sets the scp branch for the script. Branches available: en, fr, int.
     --site (-s): manually set the wikidot site url. Usefor for using scripts on sandboxes.
     --verbose (-v): prints Crom queries and their response.
+    --output (-o): file to save the output to.
+    --output-format (-f): format of the output file. Available: yaml (default), json.
 
     List of available scripts:
     help: shows this text, and nothing else.
@@ -70,7 +78,8 @@ fn main() {
         list-pages parameters:
         --author (-a): search in the pages attributed to a specific author. If the username contains spaces, escape them or use quotation marks.
         --all-tags (-T): pages must include all following tags. Put them between quotation marks and separate each tag by a space.
-        --one-of-tags (-t): pages must include one of the following tags. Put them between quotation marks and separate each tag by a space."),
+        --one-of-tags (-t): pages must include one of the following tags. Put them between quotation marks and separate each tag by a space.
+        --info (-i): defines the information requested from crom. Must be in a crom-understandable format (TODO: explain) and be used in combination with --output (can’t be directly printed in the console). Default: \"url, wikidotInfo {{title}}\""),
         script => panic!("Error: script {script} not found.")
     }
 }

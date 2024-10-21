@@ -79,7 +79,8 @@ fn main() {
         --author (-a): search in the pages attributed to a specific author. If the username contains spaces, escape them or use quotation marks.
         --all-tags (-T): pages must include all following tags. Put them between quotation marks and separate each tag by a space.
         --one-of-tags (-t): pages must include one of the following tags. Put them between quotation marks and separate each tag by a space.
-        --info (-i): defines the information requested from crom. Must be in a crom-understandable format (TODO: explain) and be used in combination with --output (can’t be directly printed in the console). Default: \"url, wikidotInfo {{title}}\""),
+        --info (-i): defines the information requested from crom. Must be in a crom-understandable format (TODO: explain) and be used in combination with --output (can’t be directly printed in the console). Default: \"url, wikidotInfo {{title}}\"\
+        --source-contains: keeps the pages that contains the given string. Can be used multiple times; only the pages containing all strings will be kept. Must be used with a --info asking for at least the source."),
         script => panic!("Error: script {script} not found.")
     }
 }

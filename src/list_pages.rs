@@ -5,13 +5,16 @@ use crate::common_tools::pages;
 use crate::script_data::OutputFormat;
 
 pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<Value> {
-    let (all_tags, one_of_tags, author, unread_args) = script_data.other_args.iter()
-        .fold((Vec::new(), Vec::new(), None, Vec::new()), |(all_tags, one_of_tags, author, unread_args), (arg, value)| match arg.as_str() {
-            "--all-tags" | "--all_tags" | "-T" => (value.split(" ").collect(), one_of_tags, author, unread_args),
-            "--one-of-tags" | "--one_of_tags" | "-t" => (all_tags, value.split(" ").collect(), author, unread_args),
-            "--author" | "-a" => (all_tags, one_of_tags, Some(value.clone()), unread_args),
-            _ => (all_tags, one_of_tags, author, unread_args.into_iter().chain(std::iter::once((arg.clone(), value.clone()))).collect()),
+    let (source_contains, all_tags, one_of_tags, author, unread_args) = script_data.other_args.iter()
+        .fold((Vec::new(), Vec::new(), Vec::new(), None, Vec::new()), |(source_contains, all_tags, one_of_tags, author, unread_args), (arg, value)| match arg.as_str() {
+            "--all-tags" | "--all_tags" | "-T" => (source_contains, value.split(" ").collect(), one_of_tags, author, unread_args),
+            "--one-of-tags" | "--one_of_tags" | "-t" => (source_contains, all_tags, value.split(" ").collect(), author, unread_args),
+            "--author" | "-a" | "--user" | "-u" => (source_contains, all_tags, one_of_tags, Some(value.clone()), unread_args),
+            "--source-contains" => (source_contains.into_iter().chain(std::iter::once(value.clone())).collect(), all_tags, one_of_tags, author, unread_args),
+            _ => (source_contains, all_tags, one_of_tags, author, unread_args.into_iter().chain(std::iter::once((arg.clone(), value.clone()))).collect()),
         });
+
+    assert!(source_contains.is_empty() || info.contains("source"), "Error: --source-contains must be used along with a --info requesting the source.");
 
     let filter_and = all_tags.into_iter().fold("".to_string(), |acc, tag| {
         let tag_filter = format!("{{ tags: {{ eq: \"{tag}\" }} }}");
@@ -40,7 +43,14 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
     script_data.other_args = unread_args;
 
     println!("Querying crom to list the pages…");
-    pages(&script_data.verbose, &script_data.site, filter, author, info.to_string())
+    pages(&script_data.verbose, &script_data.site, filter, author, info.to_string()).into_iter().filter(|page| {
+        page.get("wikidotInfo")
+            .and_then(|wikidot_info| wikidot_info.get("source")
+                .and_then(|source| source.as_str()
+                    .and_then(|source|
+                        Some(source_contains.iter().all(|criteria| source.contains(criteria))))))
+            .unwrap_or_else(|| panic!("Error: source not found but --source-contains specified. JSON: {page}"))
+    }).collect()
 }
 
 pub fn list_pages(mut script_data: ScriptData) {

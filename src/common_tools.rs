@@ -144,3 +144,4 @@ fn build_crom_query(site: &String, filter: &Option<String>, author: &Option<Stri
 pub fn pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<String>, requested_data: String) -> Vec<serde_json::Value> {
     crom_pages(verbose, site, filter, author, requested_data, None)
 }
+

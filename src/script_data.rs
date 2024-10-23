@@ -1,8 +1,9 @@
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum OutputFormat {
     JSON,
     YAML,
+    Text
     /* Custom */ // To add one day with %t etc
 }
 

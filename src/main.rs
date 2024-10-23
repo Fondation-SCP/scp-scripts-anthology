@@ -53,6 +53,7 @@ fn main() {
             "--output-format" | "-f" => script_data.output_format = match value.to_lowercase().as_str() {
                 "json" => OutputFormat::JSON,
                 "yaml" | "yml" => OutputFormat::YAML,
+                "text" | "txt" => /*OutputFormat::Text*/ unimplemented!("Text output format is not yet implemented."),
                 format => panic!("Error: unknown format {format}. Accepted formats: yaml (default), json.")
             },
             _ => script_data.other_args = script_data.other_args.into_iter().chain(std::iter::once((arg, value))).collect()
@@ -79,7 +80,8 @@ fn main() {
         --author (-a): search in the pages attributed to a specific author. If the username contains spaces, escape them or use quotation marks.
         --all-tags (-T): pages must include all following tags. Put them between quotation marks and separate each tag by a space.
         --one-of-tags (-t): pages must include one of the following tags. Put them between quotation marks and separate each tag by a space.
-        --info (-i): defines the information requested from crom. Must be in a crom-understandable format (TODO: explain) and be used in combination with --output (can’t be directly printed in the console). Default: \"url, wikidotInfo {{title}}\"\
+        --info (-i): defines the information requested from crom. (TODO: list of available information) Must be used in combination with --output (can’t be directly printed in the console). Default: \"url  wikidotInfo.title\"\
+        --output-filter: filter the information written in the output. Only the requested information will be written.
         --source-contains: keeps the pages that contains the given string. Can be used multiple times; only the pages containing all strings will be kept. Must be used with a --info asking for at least the source."),
         script => panic!("Error: script {script} not found.")
     }

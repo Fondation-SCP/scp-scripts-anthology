@@ -19,5 +19,6 @@ Parameters:
 * `--author` (`-a`): search the pages attributed to one specific author.
 * `--all-tags` (`-T`): pages must include all following tags. Put them between quotation marks and separate each tag by a space.
 * `--one-of-tags` (`-t`): pages must include one of the following tags. Put them between quotation marks and separate each tag by a space.
-* `--info` (`-i`): define the information requested from Crom. Must be in a format that Crom can understand. Default: `"url, wikidotInfo { title }"`.
+* `--info` (`-i`): define the information requested from Crom, separated by spaces or commas. Default: `"url wikidotInfo.title"`.
+* `--output-filter`: filter the information written in the output. Only the information specified will be written, if it has been requested in --info.
 * `--source-contains`: keeps the pages that contains the given string. Can be used multiple times; only the pages containing all strings will be kept. Must be used with a --info asking for at least the source.

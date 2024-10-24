@@ -82,7 +82,9 @@ fn main() {
         --one-of-tags (-t): pages must include one of the following tags. Put them between quotation marks and separate each tag by a space.
         --info (-i): defines the information requested from crom. (TODO: list of available information) Must be used in combination with --output (can’t be directly printed in the console). Default: \"url  wikidotInfo.title\"\
         --output-filter: filter the information written in the output. Only the requested information will be written.
-        --source-contains: keeps the pages that contains the given string. Can be used multiple times; only the pages containing all strings will be kept. Must be used with a --info asking for at least the source."),
+        --source-contains: keeps the pages that contains the given string. Can be used multiple times; see --source-contains-any and --source-contains-all. Must be used with a --info asking for at least wikidotInfo.source.
+        --source-contains-any: sets the source content filter to any. Pages whose source contains any of the --source-contains elements will be kept.
+        --source-contains-all: sets the source content filter to all. Pages whose source contains all of the --source-contains elements will be kept."),
         script => panic!("Error: script {script} not found.")
     }
 }

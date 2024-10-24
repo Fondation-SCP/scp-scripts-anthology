@@ -6,6 +6,7 @@ use std::fs::File;
 
 struct ListPagesParameters {
     source_contains: Vec<String>,
+    source_contains_all: bool,
     all_tags: Vec<String>,
     one_of_tags: Vec<String>,
     author: Option<String>,
@@ -16,6 +17,7 @@ impl ListPagesParameters {
     fn new() -> ListPagesParameters {
         ListPagesParameters {
             source_contains: Vec::new(),
+            source_contains_all: true,
             all_tags: Vec::new(),
             one_of_tags: Vec::new(),
             author: None,
@@ -25,6 +27,16 @@ impl ListPagesParameters {
 
     pub fn source_contains(mut self, source_contains: String) -> Self {
         self.source_contains.push(source_contains);
+        self
+    }
+
+    pub fn source_contains_all(mut self) -> Self {
+        self.source_contains_all = true;
+        self
+    }
+
+    pub fn source_contains_any(mut self) -> Self {
+        self.source_contains_all = false;
         self
     }
 
@@ -52,6 +64,7 @@ impl ListPagesParameters {
 pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<Value> {
     let ListPagesParameters {
         source_contains,
+        source_contains_all,
         all_tags,
         one_of_tags,
         author,
@@ -62,10 +75,12 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
             "--one-of-tags" | "--one_of_tags" | "-t" => lpp.one_of_tags(value.split(" ").map(|str| str.to_string()).collect()),
             "--author" | "-a" | "--user" | "-u" => lpp.author(Some(value.clone())),
             "--source-contains" => lpp.source_contains(value.clone()),
+            "--source-contains-any" => lpp.source_contains_any(),
+            "--source-contains-all" => lpp.source_contains_all(),
             _ => lpp.unread_args((arg.clone(), value.clone())),
         });
 
-    assert!(source_contains.is_empty() || info.contains("source"), "Error: --source-contains must be used along with a --info requesting the source.");
+    assert!(source_contains.is_empty() || info.contains("source"), "Error: --source-contains must be used along with a --info requesting wikidotInfo.source");
 
     let filter_and = all_tags.into_iter().fold("".to_string(), |acc, tag| {
         let tag_filter = format!("{{ tags: {{ eq: \"{tag}\" }} }}");
@@ -99,7 +114,11 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
             .and_then(|wikidot_info| wikidot_info.get("source")
                 .and_then(|source| source.as_str()
                     .and_then(|source|
-                        Some(source_contains.iter().all(|criteria| source.contains(criteria))))))
+                        Some(if source_contains_all {
+                            source_contains.iter().all(|criteria| source.contains(criteria))
+                        } else {
+                            source_contains.iter().any(|criteria| source.contains(criteria))
+                        }))))
             .unwrap_or_else(|| {
                 assert!(source_contains.is_empty(), "Error: source not found but --source-contains specified. JSON: {page}");
                 true
@@ -152,7 +171,7 @@ fn _gciq_rec_fold(mut acc: Vec<QueryTree>, item: Vec<&str>) -> Vec<QueryTree> {
 
 fn _generate_crom_query_tree(info_list: Vec<&str>) -> Vec<QueryTree> {
     info_list.into_iter().map(|info| info.split(".").collect::<Vec<&str>>())
-        .fold(Vec::new(), _gciq_rec_fold).into_iter().collect()
+        .fold(Vec::new(), _gciq_rec_fold)
 }
 
 fn _generate_crom_information_query(info_list: Vec<&str>) -> String {

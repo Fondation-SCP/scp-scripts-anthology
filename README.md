@@ -21,5 +21,6 @@ Parameters:
 * `--one-of-tags` (`-t`): pages must include one of the following tags. Put them between quotation marks and separate each tag by a space.
 * `--info` (`-i`): define the information requested from Crom, separated by spaces or commas. Default: `"url wikidotInfo.title"`.
 * `--output-filter`: filter the information written in the output. Only the information specified will be written, if it has been requested in `--info`.
-* `--source-contains`: keeps the pages that contains the given string. Can be used multiple times; see `--source-contains-any` and `--source-contains-all`. Must be used with a `--info` asking for at least `wikidotInfo.source`.
-* `--source-contains--any` and `--source-contains-all`: sets the source content filter to any/all. Pages whose source contains any/all of the `--source-contains` elements will be kept. Default: `--source-contains-all`.
+* `--source-contains`: keep the pages that matches the given regex. Can be used multiple times; see `--source-contains-any` and `--source-contains-all`. Must be used with a `--info` asking for at least `wikidotInfo.source`.
+* `--source-contains--any` and `--source-contains-all`: set the source content filter to any/all. Pages whose source matches any/all of the `--source-contains` regexes will be kept. Default: `--source-contains-all`.
+* `--source-contains-ignore-case`: ignore the case for all `--source-contains`. Not activated by default.

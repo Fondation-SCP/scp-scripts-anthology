@@ -3,14 +3,17 @@ use crate::script_data::OutputFormat;
 use crate::script_data::ScriptData;
 use serde_json::{Map, Value};
 use std::fs::File;
+use regex::{Regex, RegexBuilder};
 
 struct ListPagesParameters {
-    source_contains: Vec<String>,
+    source_contains: Vec<RegexBuilder>,
     source_contains_all: bool,
+    source_contains_ignore_case: bool,
     all_tags: Vec<String>,
     one_of_tags: Vec<String>,
     author: Option<String>,
-    unread_args: Vec<(String, String)>
+    unread_args: Vec<(String, String)>,
+    txt_output_format: String
 }
 
 impl ListPagesParameters {
@@ -18,14 +21,16 @@ impl ListPagesParameters {
         ListPagesParameters {
             source_contains: Vec::new(),
             source_contains_all: true,
+            source_contains_ignore_case: false,
             all_tags: Vec::new(),
             one_of_tags: Vec::new(),
             author: None,
-            unread_args: Vec::new()
+            unread_args: Vec::new(),
+            txt_output_format: String::new()
         }
     }
 
-    pub fn source_contains(mut self, source_contains: String) -> Self {
+    pub fn source_contains(mut self, source_contains: RegexBuilder) -> Self {
         self.source_contains.push(source_contains);
         self
     }
@@ -37,6 +42,11 @@ impl ListPagesParameters {
 
     pub fn source_contains_any(mut self) -> Self {
         self.source_contains_all = false;
+        self
+    }
+
+    pub fn source_contains_ignore_case(mut self) -> Self {
+        self.source_contains_ignore_case = true;
         self
     }
 
@@ -59,26 +69,41 @@ impl ListPagesParameters {
         self.unread_args.push(unread_args);
         self
     }
+
+    pub fn txt_output_format(mut self, txt_output_format: String) -> Self {
+        self.txt_output_format = txt_output_format;
+        self
+    }
 }
 
 pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<Value> {
     let ListPagesParameters {
         source_contains,
         source_contains_all,
+        source_contains_ignore_case,
         all_tags,
         one_of_tags,
         author,
-        unread_args
+        unread_args,
+        txt_output_format
     } = script_data.other_args.iter()
         .fold(ListPagesParameters::new(), |lpp, (arg, value)| match arg.as_str() {
             "--all-tags" | "--all_tags" | "-T" => lpp.all_tags(value.split(" ").map(|str| str.to_string()).collect()),
             "--one-of-tags" | "--one_of_tags" | "-t" => lpp.one_of_tags(value.split(" ").map(|str| str.to_string()).collect()),
             "--author" | "-a" | "--user" | "-u" => lpp.author(Some(value.clone())),
-            "--source-contains" => lpp.source_contains(value.clone()),
+            "--source-contains" => lpp.source_contains(RegexBuilder::new(value.as_str())),
             "--source-contains-any" => lpp.source_contains_any(),
             "--source-contains-all" => lpp.source_contains_all(),
+            "--source-contains-ignore-case" => lpp.source_contains_ignore_case(),
+            "--text-output-format" => lpp.txt_output_format(value.clone()),
             _ => lpp.unread_args((arg.clone(), value.clone())),
         });
+
+    let source_contains: Vec<Regex> = source_contains.into_iter().map(|mut regex_builder|
+        regex_builder.case_insensitive(source_contains_ignore_case).build().unwrap_or_else(
+            |e| panic!("Error: bad regex ({e})")
+        )
+    ).collect();
 
     assert!(source_contains.is_empty() || info.contains("source"), "Error: --source-contains must be used along with a --info requesting wikidotInfo.source");
 
@@ -112,13 +137,25 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
     pages(&script_data.verbose, &script_data.site, filter, author, info.to_string()).into_iter().filter(|page|
         page.get("wikidotInfo")
             .and_then(|wikidot_info| wikidot_info.get("source")
-                .and_then(|source| source.as_str()
-                    .and_then(|source|
-                        Some(if source_contains_all {
-                            source_contains.iter().all(|criteria| source.contains(criteria))
-                        } else {
-                            source_contains.iter().any(|criteria| source.contains(criteria))
-                        }))))
+                .and_then(|source|
+                    if source.is_null() {
+                        eprintln!("Warning [Crom problem]: source is null. JSON: {page}");
+                        Some(false)
+                    } else {
+                        source.as_str()
+                            .and_then(|source| {
+                                let source_contains_criteria = |criteria: &Regex| {
+                                    criteria.is_match(source)
+                                };
+                                Some(if source_contains_all {
+                                    source_contains.iter().all(source_contains_criteria)
+                                } else {
+                                    source_contains.iter().any(source_contains_criteria)
+                                })
+                            })
+                    }
+                )
+            )
             .unwrap_or_else(|| {
                 assert!(source_contains.is_empty(), "Error: source not found but --source-contains specified. JSON: {page}");
                 true
@@ -206,10 +243,10 @@ fn _filter_value(filters: &Vec<QueryTree>, value: Map<String, Value>) -> Map<Str
 
 pub fn list_pages(mut script_data: ScriptData) {
     let (filter, info, unread_args) = script_data.other_args.iter().fold((Vec::new(), "url wikidotInfo.title".to_string(), Vec::new()), |(text_format, info, unread_args), (arg, value)| match arg.as_str() {
-        "--info" | "-i" => if script_data.output_path.is_some() {
+        "--info" | "-i" => {
+            assert!(script_data.output_path.is_some() || (value.contains("wikidotInfo.title") && value.contains("url")), "--output not defined (thus output is console out) but url or wikidotInfo.title are not requested by --info.");
+            eprintln!("Warning: only the url and title will be shown in the terminal.");
             (text_format, _generate_crom_information_query(value.split(&[' ', ',']).collect()), unread_args)
-        } else {
-            panic!("Error: --info must be used with --output; the format can't be guessed and printed in the console.");
         },
         "--output-filter" => if script_data.output_format != OutputFormat::Text {
             (_generate_crom_query_tree(value.split(&[' ', ',']).collect()), info, unread_args)

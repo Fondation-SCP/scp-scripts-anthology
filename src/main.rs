@@ -9,18 +9,20 @@ use script_data::OutputFormat;
 
 fn main() {
 
-    let script = env::args().collect::<Vec<String>>().get(1)
-        .unwrap_or_else(|| panic!("Error: expected script name. Use \"scp-script-anthology help\" to get more info.")).clone();
+    let args = env::args().collect::<Vec<String>>();
 
-    let (mut params, remains) = env::args().skip(2).fold((Vec::new(), None), |(chain, str), arg| {
+    let script = args.get(1)
+        .unwrap_or_else(|| panic!("Error: expected script name. Use \"scp-script-anthology help\" to get more info.")).as_str();
+
+    let (mut params, remains) = args[2..].into_iter().fold((Vec::new(), None), |(chain, str), arg| {
         match str {
             Some(param) => if arg.starts_with("-") {
-                (chain.into_iter().chain(std::iter::once((param, "".to_string()))).collect(), Some(arg))
+                (chain.into_iter().chain(std::iter::once((param, ""))).collect(), Some(arg.as_str()))
             } else {
-                (chain.into_iter().chain(std::iter::once((param, arg))).collect(), None)
+                (chain.into_iter().chain(std::iter::once((param, arg.as_str()))).collect(), None)
             }
             None => if arg.starts_with("-") {
-                (chain, Some(arg))
+                (chain, Some(arg.as_str()))
             } else {
                 (chain, None)
             }
@@ -28,7 +30,7 @@ fn main() {
     });
 
     if let Some(remains) = remains {
-        params.push((remains, "".to_string()));
+        params.push((remains, ""));
     }
 
     let script_data = params.into_iter().fold(
@@ -40,7 +42,7 @@ fn main() {
             output_path: None
         },
         |mut script_data, (arg, value)| {
-        match arg.as_str() {
+        match arg {
             "--branch" | "-b" => script_data.site = match value.to_lowercase().as_str() {
                 "fr" | "french" => "http://fondationscp.wikidot.com/",
                 "en" | "main" | "english" => "http://scp-wiki.wikidot.com/",
@@ -49,7 +51,7 @@ fn main() {
             }.to_string(),
             "--site" | "-s" => script_data.site = value.to_string(),
             "--verbose" | "-v" => script_data.verbose = true,
-            "--output" | "-o" => script_data.output_path = Some(value.to_string()),
+            "--output" | "-o" => script_data.output_path = Some(value),
             "--output-format" | "-f" => script_data.output_format = match value.to_lowercase().as_str() {
                 "json" => OutputFormat::JSON,
                 "yaml" | "yml" => OutputFormat::YAML,
@@ -61,7 +63,7 @@ fn main() {
         script_data
     });
 
-    match script.as_str() {
+    match script {
         "list-pages" => list_pages::list_pages(script_data),
         "help" => println!("SCP Scripts Anthology, version 1.0
     Syntax: scp-scripts-anthology script_name parameters

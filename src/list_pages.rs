@@ -5,19 +5,19 @@ use serde_json::{Map, Value};
 use std::fs::File;
 use regex::{Regex, RegexBuilder};
 
-struct ListPagesParameters {
+struct ListPagesParameters<'a> {
     source_contains: Vec<RegexBuilder>,
     source_contains_all: bool,
     source_contains_ignore_case: bool,
-    all_tags: Vec<String>,
-    one_of_tags: Vec<String>,
-    author: Option<String>,
-    unread_args: Vec<(String, String)>,
-    txt_output_format: String
+    all_tags: Vec<&'a str>,
+    one_of_tags: Vec<&'a str>,
+    author: Option<&'a str>,
+    unread_args: Vec<(&'a str, &'a str)>,
+    txt_output_format: &'a str
 }
 
-impl ListPagesParameters {
-    fn new() -> ListPagesParameters {
+impl<'a> ListPagesParameters<'a> {
+    fn new() -> ListPagesParameters<'a> {
         ListPagesParameters {
             source_contains: Vec::new(),
             source_contains_all: true,
@@ -26,7 +26,7 @@ impl ListPagesParameters {
             one_of_tags: Vec::new(),
             author: None,
             unread_args: Vec::new(),
-            txt_output_format: String::new()
+            txt_output_format: ""
         }
     }
 
@@ -50,27 +50,27 @@ impl ListPagesParameters {
         self
     }
 
-    pub fn all_tags(mut self, all_tags: Vec<String>) -> Self {
+    pub fn all_tags(mut self, all_tags: Vec<&'a str>) -> Self {
         self.all_tags = all_tags;
         self
     }
 
-    pub fn one_of_tags(mut self, one_of_tags: Vec<String>) -> Self {
+    pub fn one_of_tags(mut self, one_of_tags: Vec<&'a str>) -> Self {
         self.one_of_tags = one_of_tags;
         self
     }
 
-    pub fn author(mut self, author: Option<String>) -> Self {
+    pub fn author(mut self, author: Option<&'a str>) -> Self {
         self.author = author;
         self
     }
 
-    pub fn unread_args(mut self, unread_args: (String, String)) -> Self {
+    pub fn unread_args(mut self, unread_args: (&'a str, &'a str)) -> Self {
         self.unread_args.push(unread_args);
         self
     }
 
-    pub fn txt_output_format(mut self, txt_output_format: String) -> Self {
+    pub fn txt_output_format(mut self, txt_output_format: &'a str) -> Self {
         self.txt_output_format = txt_output_format;
         self
     }
@@ -85,18 +85,18 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
         one_of_tags,
         author,
         unread_args,
-        txt_output_format
+        txt_output_format: _ /* to implement later */
     } = script_data.other_args.iter()
-        .fold(ListPagesParameters::new(), |lpp, (arg, value)| match arg.as_str() {
-            "--all-tags" | "--all_tags" | "-T" => lpp.all_tags(value.split(" ").map(|str| str.to_string()).collect()),
-            "--one-of-tags" | "--one_of_tags" | "-t" => lpp.one_of_tags(value.split(" ").map(|str| str.to_string()).collect()),
-            "--author" | "-a" | "--user" | "-u" => lpp.author(Some(value.clone())),
-            "--source-contains" => lpp.source_contains(RegexBuilder::new(value.as_str())),
+        .fold(ListPagesParameters::new(), |lpp, (arg, value)| match *arg {
+            "--all-tags" | "--all_tags" | "-T" => lpp.all_tags(value.split(" ").collect()),
+            "--one-of-tags" | "--one_of_tags" | "-t" => lpp.one_of_tags(value.split(" ").collect()),
+            "--author" | "-a" | "--user" | "-u" => lpp.author(Some(value)),
+            "--source-contains" => lpp.source_contains(RegexBuilder::new(value)),
             "--source-contains-any" => lpp.source_contains_any(),
             "--source-contains-all" => lpp.source_contains_all(),
             "--source-contains-ignore-case" => lpp.source_contains_ignore_case(),
-            "--text-output-format" => lpp.txt_output_format(value.clone()),
-            _ => lpp.unread_args((arg.clone(), value.clone())),
+            "--text-output-format" => lpp.txt_output_format(value),
+            _ => lpp.unread_args((arg, value)),
         });
 
     let source_contains: Vec<Regex> = source_contains.into_iter().map(|mut regex_builder|
@@ -242,7 +242,7 @@ fn _filter_value(filters: &Vec<QueryTree>, value: Map<String, Value>) -> Map<Str
 }
 
 pub fn list_pages(mut script_data: ScriptData) {
-    let (filter, info, unread_args) = script_data.other_args.iter().fold((Vec::new(), "url wikidotInfo.title".to_string(), Vec::new()), |(text_format, info, unread_args), (arg, value)| match arg.as_str() {
+    let (filter, info, unread_args) = script_data.other_args.iter().fold((Vec::new(), "url wikidotInfo.title".to_string(), Vec::new()), |(text_format, info, unread_args), (arg, value)| match *arg {
         "--info" | "-i" => {
             assert!(script_data.output_path.is_some() || (value.contains("wikidotInfo.title") && value.contains("url")), "--output not defined (thus output is console out) but url or wikidotInfo.title are not requested by --info.");
             eprintln!("Warning: only the url and title will be shown in the terminal.");
@@ -253,7 +253,7 @@ pub fn list_pages(mut script_data: ScriptData) {
         } else {
             panic!("Error: --output-filter can't be used with --format txt");
         },
-        _ => (text_format, info, unread_args.into_iter().chain(std::iter::once((arg.clone(), value.clone()))).collect())
+        _ => (text_format, info, unread_args.into_iter().chain(std::iter::once((*arg, *value))).collect())
     });
 
     script_data.other_args = unread_args;

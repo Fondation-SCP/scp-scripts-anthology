@@ -8,10 +8,10 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug)]
-pub struct ScriptData {
+pub struct ScriptData<'a> {
     pub site: String,
-    pub other_args: Vec<(String, String)>,
+    pub other_args: Vec<(&'a str, &'a str)>,
     pub verbose: bool,
     pub output_format: OutputFormat,
-    pub output_path: Option<String>
+    pub output_path: Option<&'a str>
 }

@@ -1,5 +1,7 @@
 use reqwest::blocking as breqwest;
 use reqwest::header::USER_AGENT;
+use scraper::{Html, Selector};
+use serde_json::Value;
 
 fn wait_for_ratelimit(client: &breqwest::Client, crom_url: &str) {
     let mut retries = 0;
@@ -63,8 +65,58 @@ pub fn query_crom(request: &String) -> serde_json::Value {
     }
 }
 
+fn download_content(url: &String) -> Option<String> {
+    /* Downloading html */
+    let mut retries = 0;
+    let client = breqwest::Client::new();
+    let html = loop {
+        let response = client.get(url)
+            .header(USER_AGENT, "ScpScriptAnthology/1.0")
+            .send();
+        match response {
+            Err(e) => if retries < 5 {
+                eprintln!("Content downlaod error: {e}. Retrying in 10 seconds.");
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            } else {panic!("Too many failed attemps: giving up.")},
+            Ok(response) => match response.text() {
+                Err(e) => if retries < 5 {
+                    eprintln!("Content format error: {e}. Retrying in 10 seconds.");
+                    retries += 1;
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                } else {panic!("Too many failed attemps: giving up.")},
+                Ok(text) => break text
+            }
+        }
+    };
 
-fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&str>, requested_data: String, after: Option<&str>) -> Vec<serde_json::Value> {
+    /* Extracting content */
+    let page_content_sel = Selector::parse("#page-content").unwrap();
+    let doc = Html::parse_document(html.as_str());
+    let doc = doc.select(&page_content_sel).next();
+    if doc.is_none() {
+        eprintln!("No #page-content found for {url}.");
+        return None;
+    }
+    let doc = doc.unwrap();
+
+    let deletion_selectors = vec![
+        Selector::parse(".credit-rate").unwrap(),
+        Selector::parse(".code").unwrap()
+    ];
+
+    Some(
+        Html::parse_fragment(
+            deletion_selectors.into_iter().fold(doc.html(), |collector, selector| {
+            doc.select(&selector).fold(collector, |collector, element| {
+                collector.replace(&element.html(), "")
+            })
+        }).as_str()).root_element().text().collect()
+    )
+
+}
+
+fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&str>, requested_data: String, gather_fragments_sources: bool, download_content: bool, after: Option<&str>) -> Vec<Value> {
     let query = build_crom_query(&site, &filter, &author, &requested_data, &after);
     let response = query_crom(&query);
     if *verbose {
@@ -81,10 +133,86 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
             }
         ).unwrap_or_else(|| panic!("Error in JSON response from CROM: {}\nQuery: {query}", response));
 
-    let pages_data = full_data.get("edges")
+    let mut pages_data: Vec<Value> = full_data.get("edges")
         .and_then(|edges| edges.as_array())
         .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", full_data))
-        .iter().map(|edge| edge.get("node").unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", edge)).clone());
+        .iter().map(|edge| edge.get("node").unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", edge)).clone()).collect();
+
+    if download_content && !gather_fragments_sources /* if true, content will be downloaded in the next if block */ {
+        pages_data.iter_mut().for_each(|page| {
+            let content = self::download_content(
+                &page.get("url")
+                    .and_then(|j| j.as_str())
+                    .unwrap_or_else(|| panic!("Error in JSON response from CROM (--content needs --info with url): {}", page))
+                    .to_string()
+            ).unwrap_or_else(|| {
+                eprintln!("Warning: error when retrieving content for page: {}", page);
+                String::from("Error")
+            });
+            assert!(page.is_object(), "Error in JSON response from CROM (not an object): {}", page);
+            page.as_object_mut().unwrap().insert("content".to_string(), Value::String(content));
+        });
+    }
+
+    if gather_fragments_sources {
+        pages_data.iter_mut().for_each(|page| {
+            assert!(page.is_object(), "Error in JSON response from CROM (not an object): {}", page);
+            let children: Vec<_> = page.get("wikidotInfo")
+                .and_then(|wikidotinfo| wikidotinfo.get("children"))
+                .and_then(|children| children.as_array())
+                .and_then(|children| Some(
+                    children.into_iter().filter(|child|
+                    child.get("url")
+                        .and_then(|url| url.as_str())
+                        .is_some_and(|url| url.contains("fragment:"))
+                    ).collect()
+                )).unwrap_or(Vec::new());
+
+            let mut newsource = None;
+
+            if page.get("wikidotInfo").and_then(|wikidot_info| wikidot_info.get("source")).is_some() {
+                newsource = children.iter().map(|fragment| {
+                    query_crom(&format!("
+                            {{
+                                page(url:\"{}\"){{
+                                    wikidotInfo {{ source }}
+                                }}
+                            }}
+                       ", fragment.get("url").unwrap())
+                    )
+                        .get("data")
+                        .and_then(|d| d.get("page"))
+                        .and_then(|p| p.get("wikidotInfo"))
+                        .and_then(|wi| wi.get("source"))
+                        .and_then(|source| source.as_str())
+                        .map(|source| source.to_string())
+                        .unwrap_or_else(|| panic!("Error in JSON response from CROM while querying a fragment {}", fragment.get("url").unwrap()))
+                }).reduce(|collector, part| collector + "\n" + part.as_str());
+
+            }
+
+            if download_content {
+                let newcontent = children.iter().map(|fragment|
+                    self::download_content(&fragment.get("url").unwrap().as_str().unwrap().to_string())
+                ).filter_map(|x| x)
+                    .reduce(|collector, part| collector + part.as_str());
+
+                if let Some(newcontent) = newcontent {
+                    page.as_object_mut().unwrap().insert("content".to_string(), Value::String(newcontent));
+                }
+            }
+
+            /* Done last to avoid creating a mutable reference to the page before
+               now possible because the "children" reference won't be used anymore */
+            if let Some(newsource) = newsource {
+                if let Some(oldsource) = page.get_mut("wikidotInfo")
+                    .and_then(|wikidot_info| wikidot_info.as_object_mut())
+                    .and_then(|wikidot_info| wikidot_info.get_mut("source")) {
+                    *oldsource = Value::String(newsource.to_string());
+                }
+            }
+        });
+    }
 
     let page_info = full_data.get("pageInfo").unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", full_data));
 
@@ -96,9 +224,9 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
         let next_page = page_info.get("endCursor")
             .and_then(|end_cursor| end_cursor.as_str())
             .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", page_info));
-        pages_data.chain(crom_pages(verbose, site, filter, author, requested_data, Some(next_page))).collect()
+        pages_data.into_iter().chain(crom_pages(verbose, site, filter, author, requested_data, gather_fragments_sources, download_content, Some(next_page))).collect()
     } else {
-        pages_data.collect()
+        pages_data
     }
 }
 
@@ -141,7 +269,7 @@ fn build_crom_query(site: &String, filter: &Option<String>, author: &Option<&str
     }
 }
 
-pub fn pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&str>, requested_data: String) -> Vec<serde_json::Value> {
-    crom_pages(verbose, site, filter, author, requested_data, None)
+pub fn pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&str>, requested_data: String, gather_fragments_sources: bool, download_content: bool) -> Vec<serde_json::Value> {
+    crom_pages(verbose, site, filter, author, requested_data, gather_fragments_sources, download_content, None)
 }
 

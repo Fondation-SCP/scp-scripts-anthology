@@ -3,7 +3,6 @@ use std::env;
 mod script_data;
 mod common_tools;
 mod list_pages;
-
 use script_data::ScriptData;
 use script_data::OutputFormat;
 
@@ -81,10 +80,12 @@ fn main() {
         list-pages parameters:
         --author (-a): search in the pages attributed to a specific author. If the username contains spaces, escape them or use quotation marks.
         --all-tags (-T): pages must include all following tags. Put them between quotation marks and separate each tag by a space.
-        --one-of-tags (-t): pages must include one of the following tags. Put them between quotation marks and separate each tag by a space.
         --info (-i): defines the information requested from crom. (TODO: list of available information) Must be used in combination with --output (can’t be directly printed in the console). Default: \"url  wikidotInfo.title\"\
+        --content: downloads the content of each page directly from the HTML page (text content only).
+        --gather-fragments-sources: if requesting for the page source, also gathers fragments' sources for fragmented pages (and/or content if --content is used). Must be used with a --info requesting wikidotInfo.children.url. Doesn't do anything without wikidotInfo.source or --content.
+        --one-of-tags (-t): pages must include one of the following tags. Put them between quotation marks and separate each tag by a space.
         --output-filter: filter the information written in the output. Only the requested information will be written.
-        --source-contains: keeps the pages that matches the given regex. Can be used multiple times; see --source-contains-any and --source-contains-all. Must be used with a --info asking for at least wikidotInfo.source.
+        --source-contains: keeps the pages that matches the given regex. Can be used multiple times; see --source-contains-any and --source-contains-all. Must be used with a --info requesting wikidotInfo.source.
         --source-contains-any: sets the source content filter to any. Pages whose source matches any of the --source-contains regexes will be kept.
         --source-contains-all: sets the source content filter to all. Pages whose source matches all of the --source-contains regexes will be kept.
         --source-contains-ignore-case: ignores the case for all --source-contains. Not activated by default."),

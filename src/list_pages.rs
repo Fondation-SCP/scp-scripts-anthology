@@ -13,7 +13,9 @@ struct ListPagesParameters<'a> {
     one_of_tags: Vec<&'a str>,
     author: Option<&'a str>,
     unread_args: Vec<(&'a str, &'a str)>,
-    txt_output_format: &'a str
+    txt_output_format: &'a str,
+    gather_fragments_sources: bool,
+    download_content: bool,
 }
 
 impl<'a> ListPagesParameters<'a> {
@@ -26,7 +28,9 @@ impl<'a> ListPagesParameters<'a> {
             one_of_tags: Vec::new(),
             author: None,
             unread_args: Vec::new(),
-            txt_output_format: ""
+            txt_output_format: "",
+            gather_fragments_sources: false,
+            download_content: false,
         }
     }
 
@@ -74,6 +78,16 @@ impl<'a> ListPagesParameters<'a> {
         self.txt_output_format = txt_output_format;
         self
     }
+
+    pub fn gather_fragments_sources(mut self) -> Self {
+        self.gather_fragments_sources = true;
+        self
+    }
+
+    pub fn download_content(mut self) -> Self {
+        self.download_content = true;
+        self
+    }
 }
 
 pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<Value> {
@@ -85,7 +99,9 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
         one_of_tags,
         author,
         unread_args,
-        txt_output_format: _ /* to implement later */
+        txt_output_format: _, /* to implement later */
+        gather_fragments_sources,
+        download_content,
     } = script_data.other_args.iter()
         .fold(ListPagesParameters::new(), |lpp, (arg, value)| match *arg {
             "--all-tags" | "--all_tags" | "-T" => lpp.all_tags(value.split(" ").collect()),
@@ -96,6 +112,14 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
             "--source-contains-all" => lpp.source_contains_all(),
             "--source-contains-ignore-case" => lpp.source_contains_ignore_case(),
             "--text-output-format" => lpp.txt_output_format(value),
+            "--gather-fragments-sources" => {
+                assert!(info.contains("wikidotInfo.children.url"), "Error: --gather-fragments-sources must be used along with a --info requesting wikidotInfo.children.url");
+                lpp.gather_fragments_sources()
+            },
+            "--content" => {
+                assert!(info.contains("url"), "Error: --content needs --info requesting url.");
+                lpp.download_content()
+            },
             _ => lpp.unread_args((arg, value)),
         });
 
@@ -134,7 +158,7 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
     script_data.other_args = unread_args;
 
     println!("Querying crom to list the pages…");
-    pages(&script_data.verbose, &script_data.site, filter, author, info.to_string()).into_iter().filter(|page|
+    pages(&script_data.verbose, &script_data.site, filter, author, info.to_string(), gather_fragments_sources, download_content).into_iter().filter(|page|
         page.get("wikidotInfo")
             .and_then(|wikidot_info| wikidot_info.get("source")
                 .and_then(|source|

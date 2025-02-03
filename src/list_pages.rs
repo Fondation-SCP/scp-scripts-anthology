@@ -1,137 +1,51 @@
+use crate::cli::{Cli, OutputFormat, Script};
 use crate::common_tools::pages;
-use crate::script_data::OutputFormat;
-use crate::script_data::ScriptData;
-use serde_json::{Map, Value};
-use std::fs::File;
+use clap::Parser;
 use regex::{Regex, RegexBuilder};
+use serde_json::{Map, Value};
 
-struct ListPagesParameters<'a> {
-    source_contains: Vec<RegexBuilder>,
-    source_contains_all: bool,
-    source_contains_ignore_case: bool,
-    all_tags: Vec<&'a str>,
-    one_of_tags: Vec<&'a str>,
-    author: Option<&'a str>,
-    unread_args: Vec<(&'a str, &'a str)>,
-    txt_output_format: &'a str,
+#[derive(Parser)]
+#[command(version = "0.1.0")]
+pub struct ListPagesParameters {
+    /// Defines the information requested from Crom, separated by spaces or commas.
+    #[arg(long, short, default_value = "url wikidotInfo.title")]
+    info: Vec<String>,
+    /// Pages must include all following tags.
+    #[arg(long, short = 'T', value_name = "TAGS...")]
+    all_tags: Vec<String>,
+    /// Pages must include one of the following tags.
+    #[arg(long, short = 't', value_name = "TAGS...")]
+    one_of_tags: Vec<String>,
+    /// Searches within the pages attributed to the given author.
+    #[arg(long, short)]
+    author: Option<String>,
+    /*#[arg(skip)]
+    txt_output_format: String,*/
+    /// Downloads the contents of each page from the HTML page.
+    #[arg(long, default_value = "false")]
+    content: bool,
+    /// Downloads the sources of fragmented pages. Adds wikidotInfo.source to --info if not specified.
+    #[arg(long, default_value = "false")]
     gather_fragments_sources: bool,
-    download_content: bool,
+    /// Removes from the results all pages not containing all given regexes. Adds wikidotInfo.source to --info if not specified.
+    #[arg(long, value_name = "REGEXES...")]
+    source_contains: Vec<String>,
+    /// Changes the behavior of --source-contains (removes pages not containing one of the given strings).
+    #[arg(long, default_value = "false", requires = "source_contains")]
+    source_contains_one: bool,
+    /// Ignores case for --source-contains.
+    #[arg(long, default_value = "false", requires = "source_contains")]
+    source_contains_ignore_case: bool,
 }
 
-impl<'a> ListPagesParameters<'a> {
-    fn new() -> ListPagesParameters<'a> {
-        ListPagesParameters {
-            source_contains: Vec::new(),
-            source_contains_all: true,
-            source_contains_ignore_case: false,
-            all_tags: Vec::new(),
-            one_of_tags: Vec::new(),
-            author: None,
-            unread_args: Vec::new(),
-            txt_output_format: "",
-            gather_fragments_sources: false,
-            download_content: false,
-        }
-    }
-
-    pub fn source_contains(mut self, source_contains: RegexBuilder) -> Self {
-        self.source_contains.push(source_contains);
-        self
-    }
-
-    pub fn source_contains_all(mut self) -> Self {
-        self.source_contains_all = true;
-        self
-    }
-
-    pub fn source_contains_any(mut self) -> Self {
-        self.source_contains_all = false;
-        self
-    }
-
-    pub fn source_contains_ignore_case(mut self) -> Self {
-        self.source_contains_ignore_case = true;
-        self
-    }
-
-    pub fn all_tags(mut self, all_tags: Vec<&'a str>) -> Self {
-        self.all_tags = all_tags;
-        self
-    }
-
-    pub fn one_of_tags(mut self, one_of_tags: Vec<&'a str>) -> Self {
-        self.one_of_tags = one_of_tags;
-        self
-    }
-
-    pub fn author(mut self, author: Option<&'a str>) -> Self {
-        self.author = author;
-        self
-    }
-
-    pub fn unread_args(mut self, unread_args: (&'a str, &'a str)) -> Self {
-        self.unread_args.push(unread_args);
-        self
-    }
-
-    pub fn txt_output_format(mut self, txt_output_format: &'a str) -> Self {
-        self.txt_output_format = txt_output_format;
-        self
-    }
-
-    pub fn gather_fragments_sources(mut self) -> Self {
-        self.gather_fragments_sources = true;
-        self
-    }
-
-    pub fn download_content(mut self) -> Self {
-        self.download_content = true;
-        self
-    }
-}
-
-pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<Value> {
-    let ListPagesParameters {
-        source_contains,
-        source_contains_all,
-        source_contains_ignore_case,
-        all_tags,
-        one_of_tags,
-        author,
-        unread_args,
-        txt_output_format: _, /* to implement later */
-        gather_fragments_sources,
-        download_content,
-    } = script_data.other_args.iter()
-        .fold(ListPagesParameters::new(), |lpp, (arg, value)| match *arg {
-            "--all-tags" | "--all_tags" | "-T" => lpp.all_tags(value.split(" ").collect()),
-            "--one-of-tags" | "--one_of_tags" | "-t" => lpp.one_of_tags(value.split(" ").collect()),
-            "--author" | "-a" | "--user" | "-u" => lpp.author(Some(value)),
-            "--source-contains" => lpp.source_contains(RegexBuilder::new(value)),
-            "--source-contains-any" => lpp.source_contains_any(),
-            "--source-contains-all" => lpp.source_contains_all(),
-            "--source-contains-ignore-case" => lpp.source_contains_ignore_case(),
-            "--text-output-format" => lpp.txt_output_format(value),
-            "--gather-fragments-sources" => {
-                assert!(info.contains("wikidotInfo.children.url"), "Error: --gather-fragments-sources must be used along with a --info requesting wikidotInfo.children.url");
-                lpp.gather_fragments_sources()
-            },
-            "--content" => {
-                assert!(info.contains("url"), "Error: --content needs --info requesting url.");
-                lpp.download_content()
-            },
-            _ => lpp.unread_args((arg, value)),
-        });
-
-    let source_contains: Vec<Regex> = source_contains.into_iter().map(|mut regex_builder|
-        regex_builder.case_insensitive(source_contains_ignore_case).build().unwrap_or_else(
+pub fn list_pages_subscript(global_data: &Cli, script_data: &ListPagesParameters, info: String) -> Vec<Value> {
+    let source_contains: Vec<Regex> = script_data.source_contains.iter().map(|regex|
+        RegexBuilder::new(regex.as_str()).case_insensitive(script_data.source_contains_ignore_case).build().unwrap_or_else(
             |e| panic!("Error: bad regex ({e})")
         )
     ).collect();
 
-    assert!(source_contains.is_empty() || info.contains("source"), "Error: --source-contains must be used along with a --info requesting wikidotInfo.source");
-
-    let filter_and = all_tags.into_iter().fold("".to_string(), |acc, tag| {
+    let filter_and = script_data.all_tags.iter().fold("".to_string(), |acc, tag| {
         let tag_filter = format!("{{ tags: {{ eq: \"{tag}\" }} }}");
         if acc.is_empty() {
             tag_filter
@@ -140,7 +54,7 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
         }
     });
 
-    let filter_or = one_of_tags.into_iter().fold("".to_string(), |acc, tag| {
+    let filter_or = script_data.one_of_tags.iter().fold("".to_string(), |acc, tag| {
         let tag_filter = format!("{{ tags: {{ eq: \"{tag}\" }} }}");
         if acc.is_empty() {
             tag_filter
@@ -155,10 +69,8 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
         (or, and) => Some(format!("{{ _and: [ {and}, {or} ] }}"))
     };
 
-    script_data.other_args = unread_args;
-
     println!("Querying crom to list the pages…");
-    pages(&script_data.verbose, &script_data.site, filter, author, info.to_string(), gather_fragments_sources, download_content).into_iter().filter(|page|
+    pages(&global_data.verbose, global_data.site.as_ref().unwrap(), filter, script_data.author.as_ref(), info.to_string(), script_data.gather_fragments_sources, script_data.content).into_iter().filter(|page|
         page.get("wikidotInfo")
             .and_then(|wikidot_info| wikidot_info.get("source")
                 .and_then(|source|
@@ -171,10 +83,10 @@ pub fn list_pages_subscript(script_data: &mut ScriptData, info: String) -> Vec<V
                                 let source_contains_criteria = |criteria: &Regex| {
                                     criteria.is_match(source)
                                 };
-                                Some(if source_contains_all {
-                                    source_contains.iter().all(source_contains_criteria)
-                                } else {
+                                Some(if script_data.source_contains_one {
                                     source_contains.iter().any(source_contains_criteria)
+                                } else {
+                                    source_contains.iter().all(source_contains_criteria)
                                 })
                             })
                     }
@@ -265,63 +177,39 @@ fn _filter_value(filters: &Vec<QueryTree>, value: Map<String, Value>) -> Map<Str
     }).collect()
 }
 
-pub fn list_pages(mut script_data: ScriptData) {
-    let (filter, info, unread_args) = script_data.other_args.iter().fold((Vec::new(), "url wikidotInfo.title".to_string(), Vec::new()), |(text_format, info, unread_args), (arg, value)| match *arg {
-        "--info" | "-i" => {
-            assert!(script_data.output_path.is_some() || (value.contains("wikidotInfo.title") && value.contains("url")), "--output not defined (thus output is console out) but url or wikidotInfo.title are not requested by --info.");
-            eprintln!("Warning: only the url and title will be shown in the terminal.");
-            (text_format, _generate_crom_information_query(value.split(&[' ', ',']).collect()), unread_args)
-        },
-        "--output-filter" => if script_data.output_format != OutputFormat::Text {
-            (_generate_crom_query_tree(value.split(&[' ', ',']).collect()), info, unread_args)
-        } else {
-            panic!("Error: --output-filter can't be used with --format txt");
-        },
-        _ => (text_format, info, unread_args.into_iter().chain(std::iter::once((*arg, *value))).collect())
-    });
+pub fn list_pages(mut script_data: Cli) {
 
-    script_data.other_args = unread_args;
-
-    let result: Vec<Value> = list_pages_subscript(&mut script_data, info).into_iter().filter_map(|value|
-        if let Value::Object(obj) = value {
-            Some(Value::Object(_filter_value(&filter, obj)))
-        } else {
-            None
-        }
-    ).collect();
-
-    script_data.other_args.iter().for_each(|(arg, _)| eprintln!("Warning: unknown parameter {arg}"));
-
-    if let Some(path) = script_data.output_path {
-        println!("{} result(s) found.", result.len());
-        let file = File::create(&path).unwrap_or_else(|e| panic!("Error creating output file: {e}"));
-
-        match script_data.output_format {
-            OutputFormat::JSON => {serde_json::to_writer_pretty(file, &result)
-                .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));}
-            OutputFormat::YAML => {serde_yaml::to_writer(file, &result)
-                .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));}
-            OutputFormat::Text => {unimplemented!("Text output not yet implemented."); }
-        }
-
-        println!("Results written in file {path}");
-    } else {
-        let res_str = if result.is_empty() {
-            "No results.".to_string()
-        } else {
-            result.iter().fold("".to_string(), |str, res| {
-                let url = res.get("url")
-                    .and_then(|u| u.as_str())
-                    .unwrap_or("[Unknown not found]");
-                let title = res.get("wikidotInfo")
-                    .and_then(|wikidot_info| wikidot_info.get("title")
-                        .and_then(|title_info| title_info.as_str()))
-                    .unwrap_or("[Unknown title]");
-                format!("{str}\n{title} -- {url}")
-            })
+    {
+        let params = match &mut script_data.script {
+            Script::ListPages(p) => p
         };
-        println!("Search results: {res_str}");
+
+        let source_str = "wikidotInfo.source".to_string();
+        if (!params.source_contains.is_empty() || params.gather_fragments_sources) && !params.info.contains(&source_str) {
+            params.info.push(source_str);
+        }
     }
+
+    let params = match &script_data.script {
+        Script::ListPages(p) => p
+    };
+
+    let formatted_info = _generate_crom_information_query(params.info.iter().map(|s| s.as_str()).collect());
+
+    let result: Vec<Value> = list_pages_subscript(&script_data, params, formatted_info);
+
+    println!("{} result(s) found.", result.len());
+
+    let path = script_data.output.path().clone();
+    match script_data.output_format {
+        OutputFormat::JSON => {serde_json::to_writer_pretty(script_data.output, &result)
+            .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));}
+        OutputFormat::YAML => {serde_yaml::to_writer(script_data.output, &result)
+            .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));}
+        OutputFormat::Text => {unimplemented!("Text output not yet implemented."); }
+    }
+
+    println!("Results written in file {}", path);
 
 
 

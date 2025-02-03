@@ -116,7 +116,7 @@ fn download_content(url: &String) -> Option<String> {
 
 }
 
-fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&str>, requested_data: String, gather_fragments_sources: bool, download_content: bool, after: Option<&str>) -> Vec<Value> {
+fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&String>, requested_data: String, gather_fragments_sources: bool, download_content: bool, after: Option<&str>) -> Vec<Value> {
     let query = build_crom_query(&site, &filter, &author, &requested_data, &after);
     let response = query_crom(&query);
     if *verbose {
@@ -230,7 +230,7 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
     }
 }
 
-fn build_crom_query(site: &String, filter: &Option<String>, author: &Option<&str>, requested_data: &String, after: &Option<&str>) -> String {
+fn build_crom_query(site: &String, filter: &Option<String>, author: &Option<&String>, requested_data: &String, after: &Option<&str>) -> String {
     let query_body = format!(
         "edges {{
           node {{ {requested_data} }}
@@ -269,7 +269,7 @@ fn build_crom_query(site: &String, filter: &Option<String>, author: &Option<&str
     }
 }
 
-pub fn pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&str>, requested_data: String, gather_fragments_sources: bool, download_content: bool) -> Vec<serde_json::Value> {
+pub fn pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&String>, requested_data: String, gather_fragments_sources: bool, download_content: bool) -> Vec<serde_json::Value> {
     crom_pages(verbose, site, filter, author, requested_data, gather_fragments_sources, download_content, None)
 }
 

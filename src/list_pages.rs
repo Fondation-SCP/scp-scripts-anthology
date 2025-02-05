@@ -8,13 +8,13 @@ use serde_json::{Map, Value};
 #[command(version = "0.1.0")]
 pub struct ListPagesParameters {
     /// Defines the information requested from Crom, separated by spaces or commas.
-    #[arg(long, short, default_value = "url wikidotInfo.title")]
+    #[arg(long, short, default_value = "url wikidotInfo.title", num_args = 1..)]
     info: Vec<String>,
     /// Pages must include all following tags.
-    #[arg(long, short = 'T', value_name = "TAGS...")]
+    #[arg(long, short = 'T', value_name = "TAG", num_args = 1..)]
     all_tags: Vec<String>,
     /// Pages must include one of the following tags.
-    #[arg(long, short = 't', value_name = "TAGS...")]
+    #[arg(long, short = 't', value_name = "TAG", num_args = 1..)]
     one_of_tags: Vec<String>,
     /// Searches within the pages attributed to the given author.
     #[arg(long, short)]
@@ -28,7 +28,7 @@ pub struct ListPagesParameters {
     #[arg(long, default_value = "false")]
     gather_fragments_sources: bool,
     /// Removes from the results all pages not containing all given regexes. Adds wikidotInfo.source to --info if not specified.
-    #[arg(long, value_name = "REGEXES...")]
+    #[arg(long, value_name = "REGEX", num_args = 1..)]
     source_contains: Vec<String>,
     /// Changes the behavior of --source-contains (removes pages not containing one of the given strings).
     #[arg(long, default_value = "false", requires = "source_contains")]
@@ -184,10 +184,22 @@ pub fn list_pages(mut script_data: Cli) {
             Script::ListPages(p) => p
         };
 
+        let url_str = "url".to_string();
+        if params.content && !params.info.contains(&url_str) {
+            params.info.push(url_str);
+        }
+        
         let source_str = "wikidotInfo.source".to_string();
         if (!params.source_contains.is_empty() || params.gather_fragments_sources) && !params.info.contains(&source_str) {
             params.info.push(source_str);
         }
+
+        let children_str = "wikidotInfo.children.url".to_string();
+        if params.gather_fragments_sources && !params.info.contains(&children_str) {
+            params.info.push(children_str);
+        }
+
+
     }
 
     let params = match &script_data.script {

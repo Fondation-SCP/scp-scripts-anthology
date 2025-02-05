@@ -101,7 +101,7 @@ fn download_content(url: &String) -> Option<String> {
     let doc = doc.unwrap();
 
     let deletion_selectors = vec![
-        Selector::parse(".credit-rate").unwrap(),
+        Selector::parse(".creditRate").unwrap(),
         Selector::parse(".code").unwrap()
     ];
 
@@ -172,15 +172,21 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
 
             if page.get("wikidotInfo").and_then(|wikidot_info| wikidot_info.get("source")).is_some() {
                 newsource = children.iter().map(|fragment| {
-                    query_crom(&format!("
-                            {{
-                                page(url:\"{}\"){{
+                    let query = &format!("
+                            query {{
+                                page(url:{}){{
                                     wikidotInfo {{ source }}
                                 }}
                             }}
-                       ", fragment.get("url").unwrap())
-                    )
-                        .get("data")
+                       ", fragment.get("url").unwrap());
+                    if *verbose {
+                        println!("Query: {query}");
+                    }
+                    let response = query_crom(query);
+                    if *verbose {
+                        println!("Response: {response}");
+                    }
+                    response.get("data")
                         .and_then(|d| d.get("page"))
                         .and_then(|p| p.get("wikidotInfo"))
                         .and_then(|wi| wi.get("source"))

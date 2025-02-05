@@ -1,8 +1,10 @@
+use std::io;
 use crate::cli::{Cli, OutputFormat, Script};
 use crate::common_tools::pages;
 use clap::Parser;
 use regex::{Regex, RegexBuilder};
 use serde_json::{Map, Value};
+use chrono::DateTime;
 
 #[derive(Parser)]
 #[command(version = "0.1.0")]
@@ -36,6 +38,9 @@ pub struct ListPagesParameters {
     /// Ignores case for --source-contains.
     #[arg(long, default_value = "false", requires = "source_contains")]
     source_contains_ignore_case: bool,
+    /// Sets default parameters to scrap the website for analysis with TXM. Overrides --content, --gather-fragment-sources, --format. Disables --source-contains.
+    #[arg(long, default_value = "false")]
+    txm: bool
 }
 
 pub fn list_pages_subscript(global_data: &Cli, script_data: &ListPagesParameters, info: String) -> Vec<Value> {
@@ -153,28 +158,56 @@ fn _generate_crom_information_query(info_list: Vec<&str>) -> String {
 
 fn _filter_value(filters: &Vec<QueryTree>, value: Map<String, Value>) -> Map<String, Value> {
     value.into_iter()
-    .filter_map(|(str, val) | {
-        if filters.is_empty() {
-            Some((str, val))
-        } else {
-            filters.iter().find(|filter|
-                match filter {
-                    QueryTree::MotherNode(filter_str, _) | QueryTree::Node(filter_str) => str == *filter_str,
-                    _ => false
-                }
-            ).and_then(|corresponding_filter|
-                if let Value::Object(obj) = val {
-                    if let QueryTree::MotherNode(_, members) = corresponding_filter {
-                        Some((str, Value::Object(_filter_value(members, obj))))
-                    } else {
-                        Some((str, Value::Object(obj)))
+        .filter_map(|(str, val)| {
+            if filters.is_empty() {
+                Some((str, val))
+            } else {
+                filters.iter().find(|filter|
+                    match filter {
+                        QueryTree::MotherNode(filter_str, _) | QueryTree::Node(filter_str) => str == *filter_str,
+                        _ => false
                     }
-                } else {
-                    Some((str, val))
-                }
-            )
-        }
-    }).collect()
+                ).and_then(|corresponding_filter|
+                    if let Value::Object(obj) = val {
+                        if let QueryTree::MotherNode(_, members) = corresponding_filter {
+                            Some((str, Value::Object(_filter_value(members, obj))))
+                        } else {
+                            Some((str, Value::Object(obj)))
+                        }
+                    } else {
+                        Some((str, val))
+                    }
+                )
+            }
+        }).collect()
+}
+
+fn _txm_output<W: io::Write>(mut output: W, data: &Vec<Value>) -> Result<(), io::Error> {
+    let body = data.iter().map(|page| {
+        let source = page.get("content").and_then(|content| content.as_str()).unwrap_or_else(|| panic!("Content absent but --txm used (internal error): {page}"));
+        let wikidotinfo = page.get("wikidotInfo").unwrap_or_else(|| panic!("No wikidotInfo in data: {page}"));
+        let title = wikidotinfo.get("title").and_then(|title| title.as_str()).unwrap_or_else(|| panic!("No title in data: {page}"));
+        let rating = wikidotinfo.get("rating").and_then(|rating| rating.as_i64()).unwrap_or_else(|| panic!("No rating in data: {page}"));
+        let tags = wikidotinfo.get("tags").unwrap_or_else(|| panic!("No tags in data but --txm used (internal error): {page}"))
+            .as_array().unwrap_or_else(|| panic!("tags is no array: {page}"))
+            .iter().map(|tag| tag.as_str().unwrap_or_default().to_string())
+            .reduce(|acc, tag| acc + tag.as_str() + ",").unwrap_or_default();
+        let date = wikidotinfo.get("createdAt")
+            .and_then(|date| date.as_str())
+            .and_then(|date_str| DateTime::parse_from_rfc3339(date_str).ok())
+            .unwrap_or_else(|| panic!("date bad format: {page}"));
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let hour_str = date.format("%H:%M").to_string();
+        let year_str = date.format("%Y").to_string();
+        let author = wikidotinfo.get("createdBy")
+            .and_then(|cb| cb.get("name"))
+            .and_then(|name| name.as_str())
+            .unwrap_or_else(|| panic!("No author in data: {page}"));
+
+        format!("<ecrit title=\"{title}\" rating=\"{rating}\" date=\"{date_str}\" time=\"{hour_str}\" year=\"{year_str}\" author=\"{author}\" tags=\"{tags}\">\n{source}\n</ecrit>\n",)
+    }).reduce(|acc, item| acc + item.as_str()).unwrap_or_default();
+
+    write!(output, "<?xml version=\"1.0\"?>\n<SCP>\n{body}\n</SCP>")
 }
 
 pub fn list_pages(mut script_data: Cli) {
@@ -184,22 +217,32 @@ pub fn list_pages(mut script_data: Cli) {
             Script::ListPages(p) => p
         };
 
-        let url_str = "url".to_string();
-        if params.content && !params.info.contains(&url_str) {
-            params.info.push(url_str);
-        }
-        
-        let source_str = "wikidotInfo.source".to_string();
-        if (!params.source_contains.is_empty() || params.gather_fragments_sources) && !params.info.contains(&source_str) {
-            params.info.push(source_str);
-        }
+        if params.txm {
+            params.info = vec!["url",
+                               "wikidotInfo.title",
+                               "wikidotInfo.rating",
+                               "wikidotInfo.tags",
+                               "wikidotInfo.children.url",
+                               "wikidotInfo.createdAt",
+                               "wikidotInfo.createdBy.name"
+            ].into_iter().map(|s| s.to_string()).collect();
+            params.content = true;
+        } else {
+            let url_str = "url".to_string();
+            if params.content && !params.info.contains(&url_str) {
+                params.info.push(url_str);
+            }
 
-        let children_str = "wikidotInfo.children.url".to_string();
-        if params.gather_fragments_sources && !params.info.contains(&children_str) {
-            params.info.push(children_str);
+            let source_str = "wikidotInfo.source".to_string();
+            if (!params.source_contains.is_empty() || params.gather_fragments_sources) && !params.info.contains(&source_str) {
+                params.info.push(source_str);
+            }
+
+            let children_str = "wikidotInfo.children.url".to_string();
+            if params.gather_fragments_sources && !params.info.contains(&children_str) {
+                params.info.push(children_str);
+            }
         }
-
-
     }
 
     let params = match &script_data.script {
@@ -213,16 +256,24 @@ pub fn list_pages(mut script_data: Cli) {
     println!("{} result(s) found.", result.len());
 
     let path = script_data.output.path().clone();
-    match script_data.output_format {
-        OutputFormat::JSON => {serde_json::to_writer_pretty(script_data.output, &result)
-            .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));}
-        OutputFormat::YAML => {serde_yaml::to_writer(script_data.output, &result)
-            .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));}
-        OutputFormat::Text => {unimplemented!("Text output not yet implemented."); }
+
+    if !params.txm {
+        match script_data.output_format {
+            OutputFormat::JSON => {
+                serde_json::to_writer_pretty(script_data.output, &result)
+                    .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));
+            }
+            OutputFormat::YAML => {
+                serde_yaml::to_writer(script_data.output, &result)
+                    .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));
+            }
+        }
+    } else {
+        _txm_output(script_data.output, &result)
+            .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));
     }
 
+
     println!("Results written in file {}", path);
-
-
 
 }

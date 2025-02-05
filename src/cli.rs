@@ -23,9 +23,7 @@ impl Branch {
 #[derive(Debug, PartialEq, ValueEnum, Clone)]
 pub enum OutputFormat {
     JSON,
-    YAML,
-    Text
-    /* Custom */ // To add one day with %t etc
+    YAML
 }
 
 #[derive(Subcommand)]

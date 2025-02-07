@@ -101,14 +101,15 @@ fn download_content(url: &String) -> Option<String> {
     let doc = doc.unwrap();
 
     let deletion_selectors = vec![
-        Selector::parse(".creditRate").unwrap(),
-        Selector::parse(".code").unwrap()
+        Selector::parse(".creditRate"),
+        Selector::parse(".code"),
+        Selector::parse(".footer-wikiwalk-nav")
     ];
 
     Some(
         Html::parse_fragment(
             deletion_selectors.into_iter().fold(doc.html(), |collector, selector| {
-            doc.select(&selector).fold(collector, |collector, element| {
+            doc.select(&selector.unwrap()).fold(collector, |collector, element| {
                 collector.replace(&element.html(), "")
             })
         }).as_str()).root_element().text().collect()
@@ -277,5 +278,9 @@ fn build_crom_query(site: &String, filter: &Option<String>, author: &Option<&Str
 
 pub fn pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&String>, requested_data: String, gather_fragments_sources: bool, download_content: bool) -> Vec<serde_json::Value> {
     crom_pages(verbose, site, filter, author, requested_data, gather_fragments_sources, download_content, None)
+}
+
+pub fn xml_escape(s: &str) -> String {
+    s.replace("&", "&amp;").replace("<", "&lt;").replace(">","&gt;").replace('"', "&quot;").replace("'","&apos;")
 }
 

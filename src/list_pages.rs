@@ -1,6 +1,6 @@
 use std::io;
 use crate::cli::{Cli, OutputFormat, Script};
-use crate::common_tools::pages;
+use crate::common_tools::{pages, xml_escape};
 use clap::Parser;
 use regex::{Regex, RegexBuilder};
 use serde_json::{Map, Value};
@@ -184,14 +184,14 @@ fn _filter_value(filters: &Vec<QueryTree>, value: Map<String, Value>) -> Map<Str
 
 fn _txm_output<W: io::Write>(mut output: W, data: &Vec<Value>) -> Result<(), io::Error> {
     let body = data.iter().map(|page| {
-        let source = page.get("content").and_then(|content| content.as_str()).unwrap_or_else(|| panic!("Content absent but --txm used (internal error): {page}"));
+        let source = xml_escape(page.get("content").and_then(|content| content.as_str()).unwrap_or_else(|| panic!("Content absent but --txm used (internal error): {page}")));
         let wikidotinfo = page.get("wikidotInfo").unwrap_or_else(|| panic!("No wikidotInfo in data: {page}"));
-        let title = wikidotinfo.get("title").and_then(|title| title.as_str()).unwrap_or_else(|| panic!("No title in data: {page}"));
+        let title = xml_escape(wikidotinfo.get("title").and_then(|title| title.as_str()).unwrap_or_else(|| panic!("No title in data: {page}")));
         let rating = wikidotinfo.get("rating").and_then(|rating| rating.as_i64()).unwrap_or_else(|| panic!("No rating in data: {page}"));
-        let tags = wikidotinfo.get("tags").unwrap_or_else(|| panic!("No tags in data but --txm used (internal error): {page}"))
+        let tags = xml_escape(wikidotinfo.get("tags").unwrap_or_else(|| panic!("No tags in data but --txm used (internal error): {page}"))
             .as_array().unwrap_or_else(|| panic!("tags is no array: {page}"))
             .iter().map(|tag| tag.as_str().unwrap_or_default().to_string())
-            .reduce(|acc, tag| acc + tag.as_str() + ",").unwrap_or_default();
+            .reduce(|acc, tag| acc + tag.as_str() + ",").unwrap_or_default().as_str());
         let date = wikidotinfo.get("createdAt")
             .and_then(|date| date.as_str())
             .and_then(|date_str| DateTime::parse_from_rfc3339(date_str).ok())
@@ -199,12 +199,14 @@ fn _txm_output<W: io::Write>(mut output: W, data: &Vec<Value>) -> Result<(), io:
         let date_str = date.format("%Y-%m-%d").to_string();
         let hour_str = date.format("%H:%M").to_string();
         let year_str = date.format("%Y").to_string();
-        let author = wikidotinfo.get("createdBy")
+        let month_str = date.format("%m").to_string();
+        let weekday_str = date.format("%A").to_string();
+        let author = xml_escape(wikidotinfo.get("createdBy")
             .and_then(|cb| cb.get("name"))
             .and_then(|name| name.as_str())
-            .unwrap_or_else(|| panic!("No author in data: {page}"));
+            .unwrap_or_else(|| panic!("No author in data: {page}")));
 
-        format!("<ecrit title=\"{title}\" rating=\"{rating}\" date=\"{date_str}\" time=\"{hour_str}\" year=\"{year_str}\" author=\"{author}\" tags=\"{tags}\">\n{source}\n</ecrit>\n",)
+        format!("<ecrit title=\"{title}\" rating=\"{rating}\" date=\"{date_str}\" time=\"{hour_str}\" year=\"{year_str}\" month=\"{month_str}\" weekday=\"{weekday_str}\" author=\"{author}\" tags=\"{tags}\">\n{source}\n</ecrit>\n",)
     }).reduce(|acc, item| acc + item.as_str()).unwrap_or_default();
 
     write!(output, "<?xml version=\"1.0\"?>\n<SCP>\n{body}\n</SCP>")

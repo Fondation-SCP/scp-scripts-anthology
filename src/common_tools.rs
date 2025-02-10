@@ -69,52 +69,59 @@ fn download_content(url: &String) -> Option<String> {
     /* Downloading html */
     let mut retries = 0;
     let client = breqwest::Client::new();
-    let html = loop {
+    loop {
+        if retries > 5 {
+            eprintln!("Error while downloading {url}: 5 failed attempts. Giving up.");
+            break None;
+        }
         let response = client.get(url)
             .header(USER_AGENT, "ScpScriptAnthology/1.0")
             .send();
-        match response {
-            Err(e) => if retries < 5 {
-                eprintln!("Content downlaod error: {e}. Retrying in 10 seconds.");
+        let html = match response {
+            Err(e) => {
+                eprintln!("Content downlaod error: {e}. Retrying in 5 seconds.");
                 retries += 1;
-                std::thread::sleep(std::time::Duration::from_secs(10));
-            } else {panic!("Too many failed attemps: giving up.")},
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue
+            },
             Ok(response) => match response.text() {
-                Err(e) => if retries < 5 {
-                    eprintln!("Content format error: {e}. Retrying in 10 seconds.");
+                Err(e) => {
+                    eprintln!("Content format error: {e}. Retrying in 5 seconds.");
                     retries += 1;
-                    std::thread::sleep(std::time::Duration::from_secs(10));
-                } else {panic!("Too many failed attemps: giving up.")},
-                Ok(text) => break text
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    continue
+                },
+                Ok(text) => text
             }
+        };
+        /* Extracting content */
+        let page_content_sel = Selector::parse("#page-content").unwrap();
+        let doc = Html::parse_document(html.as_str());
+        let doc = doc.select(&page_content_sel).next();
+        if doc.is_none() {
+            eprintln!("No #page-content found for {url}.");
+            retries += 1;
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue
         }
-    };
 
-    /* Extracting content */
-    let page_content_sel = Selector::parse("#page-content").unwrap();
-    let doc = Html::parse_document(html.as_str());
-    let doc = doc.select(&page_content_sel).next();
-    if doc.is_none() {
-        eprintln!("No #page-content found for {url}.");
-        return None;
+        let doc = doc.unwrap();
+
+        let deletion_selectors = vec![
+            Selector::parse(".creditRate"),
+            Selector::parse(".code"),
+            Selector::parse(".footer-wikiwalk-nav")
+        ];
+
+        break Some(
+            Html::parse_fragment(
+                deletion_selectors.into_iter().fold(doc.html(), |collector, selector| {
+                    doc.select(&selector.unwrap()).fold(collector, |collector, element| {
+                        collector.replace(&element.html(), "")
+                    })
+                }).as_str()).root_element().text().collect()
+        )
     }
-    let doc = doc.unwrap();
-
-    let deletion_selectors = vec![
-        Selector::parse(".creditRate"),
-        Selector::parse(".code"),
-        Selector::parse(".footer-wikiwalk-nav")
-    ];
-
-    Some(
-        Html::parse_fragment(
-            deletion_selectors.into_iter().fold(doc.html(), |collector, selector| {
-            doc.select(&selector.unwrap()).fold(collector, |collector, element| {
-                collector.replace(&element.html(), "")
-            })
-        }).as_str()).root_element().text().collect()
-    )
-
 }
 
 fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&String>, requested_data: String, gather_fragments_sources: bool, download_content: bool, after: Option<&str>) -> Vec<Value> {
@@ -141,6 +148,11 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
 
     if download_content && !gather_fragments_sources /* if true, content will be downloaded in the next if block */ {
         pages_data.iter_mut().for_each(|page| {
+            let title = page.get("wikidotInfo").and_then(|wikidotinfo| wikidotinfo.get("title"));
+            if let Some(title) = title {
+                println!("Downloading content of {title}");
+            }
+
             let content = self::download_content(
                 &page.get("url")
                     .and_then(|j| j.as_str())

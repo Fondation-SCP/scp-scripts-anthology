@@ -191,22 +191,23 @@ fn _txm_output<W: io::Write>(mut output: W, data: &Vec<Value>) -> Result<(), io:
         let tags = xml_escape(wikidotinfo.get("tags").unwrap_or_else(|| panic!("No tags in data but --txm used (internal error): {page}"))
             .as_array().unwrap_or_else(|| panic!("tags is no array: {page}"))
             .iter().map(|tag| tag.as_str().unwrap_or_default().to_string())
-            .reduce(|acc, tag| acc + tag.as_str() + ",").unwrap_or_default().as_str());
+            .reduce(|acc, tag| acc + "," + tag.as_str()).unwrap_or_default().as_str());
         let date = wikidotinfo.get("createdAt")
             .and_then(|date| date.as_str())
             .and_then(|date_str| DateTime::parse_from_rfc3339(date_str).ok())
             .unwrap_or_else(|| panic!("date bad format: {page}"));
         let date_str = date.format("%Y-%m-%d").to_string();
-        let hour_str = date.format("%H:%M").to_string();
+        let time_str = date.format("%H:%M").to_string();
         let year_str = date.format("%Y").to_string();
         let month_str = date.format("%m").to_string();
         let weekday_str = date.format("%A").to_string();
+        let hour_str = date.format("%H").to_string();
         let author = xml_escape(wikidotinfo.get("createdBy")
             .and_then(|cb| cb.get("name"))
             .and_then(|name| name.as_str())
             .unwrap_or_else(|| panic!("No author in data: {page}")));
 
-        format!("<ecrit title=\"{title}\" rating=\"{rating}\" date=\"{date_str}\" time=\"{hour_str}\" year=\"{year_str}\" month=\"{month_str}\" weekday=\"{weekday_str}\" author=\"{author}\" tags=\"{tags}\">\n{source}\n</ecrit>\n",)
+        format!("<ecrit title=\"{title}\" rating=\"{rating}\" date=\"{date_str}\" time=\"{time_str}\" hour=\"{hour_str}\" year=\"{year_str}\" month=\"{month_str}\" weekday=\"{weekday_str}\" author=\"{author}\" tags=\"{tags}\">\n{source}\n</ecrit>\n",)
     }).reduce(|acc, item| acc + item.as_str()).unwrap_or_default();
 
     write!(output, "<?xml version=\"1.0\"?>\n<SCP>\n{body}\n</SCP>")

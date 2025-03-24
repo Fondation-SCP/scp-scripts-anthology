@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::io;
 use crate::cli::{Cli, OutputFormat, Script};
 use crate::common_tools::{pages, xml_escape};
@@ -7,7 +8,7 @@ use serde_json::{Map, Value};
 use chrono::DateTime;
 
 #[derive(Parser)]
-#[command(version = "0.1.0")]
+#[command(version = "0.2.0")]
 pub struct ListPagesParameters {
     /// Defines the information requested from Crom, separated by spaces or commas.
     #[arg(long, short, default_value = "url wikidotInfo.title", num_args = 1..)]
@@ -43,7 +44,7 @@ pub struct ListPagesParameters {
     txm: bool
 }
 
-pub fn list_pages_subscript(global_data: &Cli, script_data: &ListPagesParameters, info: String) -> Vec<Value> {
+pub async fn list_pages_subscript(global_data: &Cli, script_data: &ListPagesParameters, info: String) -> Vec<Value> {
     let source_contains: Vec<Regex> = script_data.source_contains.iter().map(|regex|
         RegexBuilder::new(regex.as_str()).case_insensitive(script_data.source_contains_ignore_case).build().unwrap_or_else(
             |e| panic!("Error: bad regex ({e})")
@@ -75,7 +76,7 @@ pub fn list_pages_subscript(global_data: &Cli, script_data: &ListPagesParameters
     };
 
     println!("Querying crom to list the pages…");
-    pages(&global_data.verbose, global_data.site.as_ref().unwrap(), filter, script_data.author.as_ref(), info.to_string(), script_data.gather_fragments_sources, script_data.content).into_iter().filter(|page|
+    pages(&global_data.verbose, global_data.site.as_ref().unwrap(), filter, script_data.author.as_ref(), info.to_string(), script_data.gather_fragments_sources, script_data.content).await.into_iter().filter(|page|
         page.get("wikidotInfo")
             .and_then(|wikidot_info| wikidot_info.get("source")
                 .and_then(|source|
@@ -111,9 +112,9 @@ enum QueryTree {
     None
 }
 
-impl ToString for QueryTree {
-    fn to_string(&self) -> String {
-        match self {
+impl Display for QueryTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let str = match self {
             QueryTree::Node(node) => format!("{node},"),
             QueryTree::MotherNode(node, children) =>
                 format!("{node} {{ {} }},",
@@ -122,7 +123,8 @@ impl ToString for QueryTree {
                         )
                 ),
             QueryTree::None => String::new()
-        }
+        };
+        write!(f, "{}", str)
     }
 }
 
@@ -213,11 +215,12 @@ fn _txm_output<W: io::Write>(mut output: W, data: &Vec<Value>) -> Result<(), io:
     write!(output, "<?xml version=\"1.0\"?>\n<SCP>\n{body}\n</SCP>")
 }
 
-pub fn list_pages(mut script_data: Cli) {
+pub async fn list_pages(mut script_data: Cli) {
 
     {
         let params = match &mut script_data.script {
-            Script::ListPages(p) => p
+            Script::ListPages(p) => p,
+            _ => panic!()
         };
 
         if params.txm {
@@ -249,12 +252,13 @@ pub fn list_pages(mut script_data: Cli) {
     }
 
     let params = match &script_data.script {
-        Script::ListPages(p) => p
+        Script::ListPages(p) => p,
+        _ => panic!()
     };
 
     let formatted_info = _generate_crom_information_query(params.info.iter().map(|s| s.as_str()).collect());
 
-    let result: Vec<Value> = list_pages_subscript(&script_data, params, formatted_info);
+    let result: Vec<Value> = list_pages_subscript(&script_data, params, formatted_info).await;
 
     println!("{} result(s) found.", result.len());
 

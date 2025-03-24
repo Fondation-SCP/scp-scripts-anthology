@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 use clap::Subcommand;
 use clio::Output;
-use crate::list_pages;
+use crate::{forum_dl, list_pages};
 
 #[derive(Debug, PartialEq, ValueEnum, Clone)]
 pub enum Branch {
@@ -28,7 +28,10 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 pub enum Script {
-    ListPages(list_pages::ListPagesParameters)
+    /// Selects pages with selected criteria and downloads multiple information about them.
+    ListPages(list_pages::ListPagesParameters),
+    /// Downloads the forum of a Wikidot wiki.
+    ForumDl(forum_dl::ForumDlParameters)
 }
 
 #[derive(Parser)]
@@ -49,6 +52,9 @@ pub struct Cli {
     /// The format of the output.
     #[arg(value_enum, short = 'f', long, default_value = "yaml", ignore_case = true)]
     pub output_format: OutputFormat,
+    /// Number of parallel threads.
+    #[arg(short = 'm', long, default_value = "4")]
+    pub threads: usize,
     #[command(subcommand)]
     pub script: Script,
 }

@@ -1,11 +1,13 @@
 mod common_tools;
 mod list_pages;
 mod cli;
+mod forum_dl;
 
 use crate::list_pages::list_pages;
 use clap::Parser;
 use cli::Cli;
 use cli::Script;
+use crate::forum_dl::forum_dl;
 /*
 Parse the parameters into a vector of parameters + arguments.
  */
@@ -32,7 +34,8 @@ fn _parse_parameters(args: &Vec<String>) -> Vec<(&str, &str)> {
     params
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
 
     let mut args = Cli::parse();
 
@@ -41,6 +44,7 @@ fn main() {
     }
 
     match args.script {
-        Script::ListPages(_) => list_pages(args),
+        Script::ListPages(_) => list_pages(args).await,
+        Script::ForumDl(_) => forum_dl(args).await,
     }
 }

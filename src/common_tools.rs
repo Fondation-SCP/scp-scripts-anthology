@@ -1,24 +1,25 @@
-use reqwest::blocking as breqwest;
+use futures_util::future::join_all;
+use futures_util::FutureExt;
 use reqwest::header::USER_AGENT;
 use scraper::{Html, Selector};
 use serde_json::Value;
 
-fn wait_for_ratelimit(client: &breqwest::Client, crom_url: &str) {
+async fn wait_for_ratelimit(client: &reqwest::Client, crom_url: &str) {
     let mut retries = 0;
     let rate_limit_request = "query {rateLimit{remaining, resetAt}}";
     loop {
         let response = client.post(crom_url)
             .header(USER_AGENT, "ScpScriptAnthology/1.0")
             .json(&serde_json::json!({"query": rate_limit_request}))
-            .send();
+            .send().await;
         match response {
             Err(e) => if retries < 5 {
                 eprintln!("Request error: {e}. Retrying in 10 seconds.");
                 retries += 1;
-                std::thread::sleep(std::time::Duration::from_secs(10));
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             } else {panic!("Too many failed attempts: giving up.")},
             Ok(response) => {
-                let json_res: serde_json::Value = response.json().unwrap_or_else(|e| panic!("Recieved data is not JSON? Error: {e}"));
+                let json_res: Value = response.json().await.unwrap_or_else(|e| panic!("Recieved data is not JSON? Error: {e}"));
                 let remaining = json_res.get("data")
                     .and_then(|data| data.get("rateLimit")
                         .and_then(|ratelimit| ratelimit.get("remaining")
@@ -26,12 +27,12 @@ fn wait_for_ratelimit(client: &breqwest::Client, crom_url: &str) {
                 match remaining {
                     Some(0) => {
                         println!("Rate limited by Crom. Waiting 5 minutes.");
-                        std::thread::sleep(std::time::Duration::from_secs(300));
+                        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                     },
                     None => match json_res.get("errors") {
                         Some(errors) => {
                             eprintln!("Warning: Crom might be flooded! Waiting 15 seconds.\n{errors}");
-                            std::thread::sleep(std::time::Duration::from_secs(15));
+                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                             eprintln!("Retrying.");
                         },
                         None => panic!("Error in the JSON response from CROM: {}", json_res.to_string()),
@@ -43,32 +44,32 @@ fn wait_for_ratelimit(client: &breqwest::Client, crom_url: &str) {
     }
 }
 
-pub fn query_crom(request: &String) -> serde_json::Value {
+pub async fn query_crom(request: &String) -> Value {
     let crom_url = "https://api.crom.avn.sh/graphql";
     let mut retries = 0;
-    let client = breqwest::Client::new();
-    wait_for_ratelimit(&client, &crom_url);
+    let client = reqwest::Client::new();
+    wait_for_ratelimit(&client, &crom_url).await;
 
     loop {
         let response = client.post(crom_url)
             .header(USER_AGENT, "ScpScriptAnthology/1.0")
             .json(&serde_json::json!({"query": request}))
-            .send();
+            .send().await;
         match response {
             Err(e) => if retries < 5 {
                 eprintln!("Request error: {e}. Retrying in 10 seconds.");
                 retries += 1;
-                std::thread::sleep(std::time::Duration::from_secs(10));
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             } else {panic!("Too many failed attemps: giving up.")},
-            Ok(response) => break response.json().unwrap_or_else(|e| panic!("Recieved data is not JSON? Error: {e}"))
+            Ok(response) => break response.json().await.unwrap_or_else(|e| panic!("Recieved data is not JSON? Error: {e}"))
         }
     }
 }
 
-fn download_content(url: &String) -> Option<String> {
+async fn download_content(url: &String) -> Option<String> {
     /* Downloading html */
     let mut retries = 0;
-    let client = breqwest::Client::new();
+    let client = reqwest::Client::new();
     loop {
         if retries > 5 {
             eprintln!("Error while downloading {url}: 5 failed attempts. Giving up.");
@@ -76,19 +77,19 @@ fn download_content(url: &String) -> Option<String> {
         }
         let response = client.get(url)
             .header(USER_AGENT, "ScpScriptAnthology/1.0")
-            .send();
+            .send().await;
         let html = match response {
             Err(e) => {
                 eprintln!("Content downlaod error: {e}. Retrying in 5 seconds.");
                 retries += 1;
-                std::thread::sleep(std::time::Duration::from_secs(5));
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue
             },
-            Ok(response) => match response.text() {
+            Ok(response) => match response.text().await {
                 Err(e) => {
                     eprintln!("Content format error: {e}. Retrying in 5 seconds.");
                     retries += 1;
-                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue
                 },
                 Ok(text) => text
@@ -101,7 +102,7 @@ fn download_content(url: &String) -> Option<String> {
         if doc.is_none() {
             eprintln!("No #page-content found for {url}.");
             retries += 1;
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue
         }
 
@@ -124,9 +125,9 @@ fn download_content(url: &String) -> Option<String> {
     }
 }
 
-fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&String>, requested_data: String, gather_fragments_sources: bool, download_content: bool, after: Option<&str>) -> Vec<Value> {
+async fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&String>, requested_data: String, gather_fragments_sources: bool, download_content: bool, after: Option<&str>) -> Vec<Value> {
     let query = build_crom_query(&site, &filter, &author, &requested_data, &after);
-    let response = query_crom(&query);
+    let response = query_crom(&query).await;
     if *verbose {
         println!("Query: {query}");
         println!("Response: {response}");
@@ -147,7 +148,7 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
         .iter().map(|edge| edge.get("node").unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", edge)).clone()).collect();
 
     if download_content && !gather_fragments_sources /* if true, content will be downloaded in the next if block */ {
-        pages_data.iter_mut().for_each(|page| {
+        join_all(pages_data.iter_mut().map(async |page| {
             let title = page.get("wikidotInfo").and_then(|wikidotinfo| wikidotinfo.get("title"));
             if let Some(title) = title {
                 println!("Downloading content of {title}");
@@ -158,44 +159,44 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
                     .and_then(|j| j.as_str())
                     .unwrap_or_else(|| panic!("Error in JSON response from CROM (--content needs --info with url): {}", page))
                     .to_string()
-            ).unwrap_or_else(|| {
+            ).await.unwrap_or_else(|| {
                 eprintln!("Warning: error when retrieving content for page: {}", page);
                 String::from("Error")
             });
             assert!(page.is_object(), "Error in JSON response from CROM (not an object): {}", page);
             page.as_object_mut().unwrap().insert("content".to_string(), Value::String(content));
-        });
+        })).await;
     }
 
     if gather_fragments_sources {
-        pages_data.iter_mut().for_each(|page| {
+        join_all(pages_data.iter_mut().map(async |page| {
             assert!(page.is_object(), "Error in JSON response from CROM (not an object): {}", page);
             let children: Vec<_> = page.get("wikidotInfo")
                 .and_then(|wikidotinfo| wikidotinfo.get("children"))
                 .and_then(|children| children.as_array())
                 .and_then(|children| Some(
                     children.into_iter().filter(|child|
-                    child.get("url")
-                        .and_then(|url| url.as_str())
-                        .is_some_and(|url| url.contains("fragment:"))
+                        child.get("url")
+                            .and_then(|url| url.as_str())
+                            .is_some_and(|url| url.contains("fragment:"))
                     ).collect()
                 )).unwrap_or(Vec::new());
 
             let mut newsource = None;
 
             if page.get("wikidotInfo").and_then(|wikidot_info| wikidot_info.get("source")).is_some() {
-                newsource = children.iter().map(|fragment| {
+                newsource = join_all(children.iter().map(async |fragment| {
                     let query = &format!("
-                            query {{
-                                page(url:{}){{
-                                    wikidotInfo {{ source }}
-                                }}
+                        query {{
+                            page(url:{}){{
+                                wikidotInfo {{ source }}
                             }}
-                       ", fragment.get("url").unwrap());
+                        }}
+                   ", fragment.get("url").unwrap());
                     if *verbose {
                         println!("Query: {query}");
                     }
-                    let response = query_crom(query);
+                    let response = query_crom(query).await;
                     if *verbose {
                         println!("Response: {response}");
                     }
@@ -206,14 +207,14 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
                         .and_then(|source| source.as_str())
                         .map(|source| source.to_string())
                         .unwrap_or_else(|| panic!("Error in JSON response from CROM while querying a fragment {}", fragment.get("url").unwrap()))
-                }).reduce(|collector, part| collector + "\n" + part.as_str());
+                })).await.into_iter().reduce(|collector, part| collector + "\n" + part.as_str());
 
             }
 
             if download_content {
-                let newcontent = children.iter().map(|fragment|
-                    self::download_content(&fragment.get("url").unwrap().as_str().unwrap().to_string())
-                ).filter_map(|x| x)
+                let newcontent = join_all(children.iter().map(async |fragment|
+                    self::download_content(&fragment.get("url").unwrap().as_str().unwrap().to_string()).await
+                )).await.into_iter().filter_map(|x| x)
                     .reduce(|collector, part| collector + part.as_str());
 
                 if let Some(newcontent) = newcontent {
@@ -230,7 +231,7 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
                     *oldsource = Value::String(newsource.to_string());
                 }
             }
-        });
+        })).await;
     }
 
     let page_info = full_data.get("pageInfo").unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", full_data));
@@ -243,7 +244,7 @@ fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Opt
         let next_page = page_info.get("endCursor")
             .and_then(|end_cursor| end_cursor.as_str())
             .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", page_info));
-        pages_data.into_iter().chain(crom_pages(verbose, site, filter, author, requested_data, gather_fragments_sources, download_content, Some(next_page))).collect()
+        pages_data.into_iter().chain(Box::pin(crom_pages(verbose, site, filter, author, requested_data, gather_fragments_sources, download_content, Some(next_page))).await).collect()
     } else {
         pages_data
     }
@@ -288,11 +289,32 @@ fn build_crom_query(site: &String, filter: &Option<String>, author: &Option<&Str
     }
 }
 
-pub fn pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&String>, requested_data: String, gather_fragments_sources: bool, download_content: bool) -> Vec<serde_json::Value> {
-    crom_pages(verbose, site, filter, author, requested_data, gather_fragments_sources, download_content, None)
+pub async fn pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&String>, requested_data: String, gather_fragments_sources: bool, download_content: bool) -> Vec<Value> {
+    crom_pages(verbose, site, filter, author, requested_data, gather_fragments_sources, download_content, None).await
 }
 
 pub fn xml_escape(s: &str) -> String {
     s.replace("&", "&amp;").replace("<", "&lt;").replace(">","&gt;").replace('"', "&quot;").replace("'","&apos;")
 }
 
+pub async fn download_html(client: &reqwest::Client, url: &str, max_retries: i32) -> Result<Html, reqwest::Error> {
+    let mut retries = 0;
+    loop {
+        let response = client.get(url)
+            .header(USER_AGENT, "ScpScriptAnthology/1.0")
+            .send().then(async |r| match r {
+                Ok(r) => r.text().await,
+                Err(e) => Err(e),
+            }).await;
+        if let Err(e) = response {
+            if retries < max_retries {
+                eprintln!("Request error: {e}. Retrying in 2 seconds.");
+                //dbg!(e);
+                retries += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            } else {break Err(e)}
+        }
+        break Ok(Html::parse_document(response?.as_str()));
+    }
+}

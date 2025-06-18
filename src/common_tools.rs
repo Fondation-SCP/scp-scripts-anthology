@@ -31,8 +31,8 @@ async fn wait_for_ratelimit(client: &reqwest::Client, crom_url: &str) {
                     },
                     None => match json_res.get("errors") {
                         Some(errors) => {
-                            eprintln!("Warning: Crom might be flooded! Waiting 15 seconds.\n{errors}");
-                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                            eprintln!("Warning: Crom might be flooded! Waiting 30 seconds.\n{errors}");
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                             eprintln!("Retrying.");
                         },
                         None => panic!("Error in the JSON response from CROM: {}", json_res.to_string()),
@@ -51,17 +51,28 @@ pub async fn query_crom(request: &String) -> Value {
     wait_for_ratelimit(&client, &crom_url).await;
 
     loop {
-        let response = client.post(crom_url)
-            .header(USER_AGENT, "ScpScriptAnthology/1.0")
-            .json(&serde_json::json!({"query": request}))
-            .send().await;
-        match response {
-            Err(e) => if retries < 5 {
-                eprintln!("Request error: {e}. Retrying in 10 seconds.");
+        let res: Value = loop {
+            assert!(retries < 5, "Too many failed attemps: giving up.");
+            let response = client.post(crom_url)
+                .header(USER_AGENT, "ScpScriptAnthology/1.0")
+                .json(&serde_json::json!({"query": request}))
+                .send().await;
+            match response {
+                Err(e) => {
+                    eprintln!("Request error: {e}. Retrying in 10 seconds.");
+                    retries += 1;
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                },
+                Ok(response) => break response.json().await.unwrap_or_else(|e| panic!("Recieved data is not JSON? Error: {e}"))
+            }
+        };
+        match res.get("errors") {
+            Some(errors) => {
+                eprintln!("Crom returned error(s): {errors}. Waiting 30 seconds.");
                 retries += 1;
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            } else {panic!("Too many failed attemps: giving up.")},
-            Ok(response) => break response.json().await.unwrap_or_else(|e| panic!("Recieved data is not JSON? Error: {e}"))
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+            None => break res
         }
     }
 }
@@ -146,6 +157,8 @@ async fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, autho
         .and_then(|edges| edges.as_array())
         .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", full_data))
         .iter().map(|edge| edge.get("node").unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", edge)).clone()).collect();
+
+    println!("Searched through {} pages…", pages_data.len());
 
     if download_content && !gather_fragments_sources /* if true, content will be downloaded in the next if block */ {
         join_all(pages_data.iter_mut().map(async |page| {

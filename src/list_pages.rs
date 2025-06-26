@@ -41,7 +41,10 @@ pub struct ListPagesParameters {
     source_contains_ignore_case: bool,
     /// Sets default parameters to scrap the website for analysis with TXM. Overrides --content, --gather-fragment-sources, --format. Disables --source-contains.
     #[arg(long, default_value = "false")]
-    txm: bool
+    txm: bool,
+    /// Lists the files of listed pages
+    #[arg(long, short, default_value = "false")]
+    files: bool,
 }
 
 pub async fn list_pages_subscript(global_data: &Cli, script_data: &ListPagesParameters, info: String) -> Vec<Value> {

@@ -136,6 +136,19 @@ async fn download_content(url: &String) -> Option<String> {
     }
 }
 
+fn list_children(page: &Value) -> Vec<&Value> {
+    page.get("wikidotInfo")
+        .and_then(|wikidotinfo| wikidotinfo.get("children"))
+        .and_then(|children| children.as_array())
+        .map(|children|
+            children.into_iter().filter(|child|
+                child.get("url")
+                    .and_then(|url| url.as_str())
+                    .is_some_and(|url| url.contains("fragment:"))
+            ).rev().collect()
+        ).unwrap_or(Vec::new())
+}
+
 async fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, author: Option<&String>, requested_data: String, gather_fragments_sources: bool, download_content: bool, after: Option<&str>) -> Vec<Value> {
     let query = build_crom_query(&site, &filter, &author, &requested_data, &after);
     let response = query_crom(&query).await;
@@ -156,82 +169,68 @@ async fn crom_pages(verbose: &bool, site: &String, filter: Option<String>, autho
     let mut pages_data: Vec<Value> = full_data.get("edges")
         .and_then(|edges| edges.as_array())
         .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", full_data))
-        .iter().map(|edge| edge.get("node").unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", edge)).clone()).collect();
+        .iter().map(|edge| edge.get("node").unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", edge)).clone())
+        .inspect(|page| println!("{}", page.get("url").and_then(|url| url.as_str()).unwrap_or("Invalid URL")))
+        .collect();
 
-    println!("Searched through {} pages…", pages_data.len());
-
-    if download_content && !gather_fragments_sources /* if true, content will be downloaded in the next if block */ {
-        join_all(pages_data.iter_mut().map(async |page| {
-            let title = page.get("wikidotInfo").and_then(|wikidotinfo| wikidotinfo.get("title"));
-            if let Some(title) = title {
-                println!("Downloading content of {title}");
-            }
-
-            let content = self::download_content(
-                &page.get("url")
-                    .and_then(|j| j.as_str())
-                    .unwrap_or_else(|| panic!("Error in JSON response from CROM (--content needs --info with url): {}", page))
-                    .to_string()
-            ).await.unwrap_or_else(|| {
-                eprintln!("Warning: error when retrieving content for page: {}", page);
-                String::from("Error")
-            });
-            assert!(page.is_object(), "Error in JSON response from CROM (not an object): {}", page);
-            page.as_object_mut().unwrap().insert("content".to_string(), Value::String(content));
-        })).await;
-    }
-
-    if gather_fragments_sources {
+    if gather_fragments_sources || download_content {
         join_all(pages_data.iter_mut().map(async |page| {
             assert!(page.is_object(), "Error in JSON response from CROM (not an object): {}", page);
-            let children: Vec<_> = page.get("wikidotInfo")
-                .and_then(|wikidotinfo| wikidotinfo.get("children"))
-                .and_then(|children| children.as_array())
-                .and_then(|children| Some(
-                    children.into_iter().filter(|child|
-                        child.get("url")
-                            .and_then(|url| url.as_str())
-                            .is_some_and(|url| url.contains("fragment:"))
-                    ).collect()
-                )).unwrap_or(Vec::new());
-
+            let children: Vec<_> = if gather_fragments_sources { list_children(page) } else {Vec::new()};
             let mut newsource = None;
-
-            if page.get("wikidotInfo").and_then(|wikidot_info| wikidot_info.get("source")).is_some() {
-                newsource = join_all(children.iter().map(async |fragment| {
-                    let query = &format!("
+            if gather_fragments_sources {
+                if page.get("wikidotInfo").and_then(|wikidot_info| wikidot_info.get("source")).is_some() {
+                    newsource = join_all(children.iter().map(async |fragment| {
+                        let query = &format!("
                         query {{
                             page(url:{}){{
                                 wikidotInfo {{ source }}
                             }}
                         }}
                    ", fragment.get("url").unwrap());
-                    if *verbose {
-                        println!("Query: {query}");
-                    }
-                    let response = query_crom(query).await;
-                    if *verbose {
-                        println!("Response: {response}");
-                    }
-                    response.get("data")
-                        .and_then(|d| d.get("page"))
-                        .and_then(|p| p.get("wikidotInfo"))
-                        .and_then(|wi| wi.get("source"))
-                        .and_then(|source| source.as_str())
-                        .map(|source| source.to_string())
-                        .unwrap_or_else(|| panic!("Error in JSON response from CROM while querying a fragment {}", fragment.get("url").unwrap()))
-                })).await.into_iter().reduce(|collector, part| collector + "\n" + part.as_str());
+                        if *verbose {
+                            println!("Query: {query}");
+                        }
+                        let response = query_crom(query).await;
+                        if *verbose {
+                            println!("Response: {response}");
+                        }
+                        response.get("data")
+                            .and_then(|d| d.get("page"))
+                            .and_then(|p| p.get("wikidotInfo"))
+                            .and_then(|wi| wi.get("source"))
+                            .and_then(|source| source.as_str())
+                            .map(|source| source.to_string())
+                            .unwrap_or_else(|| panic!("Error in JSON response from CROM while querying a fragment {}", fragment.get("url").unwrap()))
+                    })).await
+                        .into_iter().reduce(|collector, part| collector + "\n" + part.as_str());
 
+                }
             }
 
             if download_content {
-                let newcontent = join_all(children.iter().map(async |fragment|
-                    self::download_content(&fragment.get("url").unwrap().as_str().unwrap().to_string()).await
-                )).await.into_iter().filter_map(|x| x)
-                    .reduce(|collector, part| collector + part.as_str());
+                let title = page.get("wikidotInfo").and_then(|wikidotinfo| wikidotinfo.get("title"));
+                if let Some(title) = title {
+                    println!("Downloading content of {title}");
+                }
+
+                let newcontent = if !children.is_empty() {
+                    let newcontent = join_all(children.iter().map(async |fragment|
+                        self::download_content(&fragment.get("url").unwrap().as_str().unwrap().to_string()).await
+                    )).await;
+                    if newcontent.iter().any(|frag| frag.is_none()) {
+                        eprintln!("Warning: error when retrieving content for page: {}", page);
+                    }
+                    newcontent.into_iter().filter_map(|x| x)
+                        .reduce(|collector, part| collector + part.as_str())
+                } else {
+                    self::download_content(&page.get("url").unwrap().as_str().unwrap().to_string()).await
+                };
 
                 if let Some(newcontent) = newcontent {
                     page.as_object_mut().unwrap().insert("content".to_string(), Value::String(newcontent));
+                } else {
+                    eprintln!("Warning: no content available for page: {}", page);
                 }
             }
 

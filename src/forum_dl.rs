@@ -1,4 +1,5 @@
-use crate::cli::{Cli, OutputFormat, Script};
+use crate::cli::{Cli, Script};
+use crate::common_tools;
 use crate::common_tools::download_html;
 use clap::Parser;
 use futures_util::future::join_all;
@@ -179,8 +180,8 @@ async fn _category_dl(client: Arc<reqwest::Client>, mut category: Category, site
 
 pub async fn forum_dl(data: Cli) {
     let client = Arc::new(reqwest::Client::new());
-    let url = data.site.unwrap();
-    let forum_dl_parameters = match data.script {
+    let url = data.site.as_ref().unwrap();
+    let forum_dl_parameters = match &data.script {
         Script::ForumDl(e) => e,
         _ => panic!() /* Impossible, treated in main */
     };
@@ -231,16 +232,7 @@ pub async fn forum_dl(data: Cli) {
 
     let path = data.output.path().clone();
 
-    match data.output_format {
-        OutputFormat::JSON => {
-            serde_json::to_writer_pretty(data.output, &categories)
-                .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));
-        }
-        OutputFormat::YAML => {
-            serde_yaml::to_writer(data.output, &categories)
-                .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));
-        }
-    }
+    common_tools::write_out(data, &categories);
 
     println!("Results written in file {}", path);
 

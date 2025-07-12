@@ -1,11 +1,12 @@
 use std::fmt::Display;
 use std::io;
-use crate::cli::{Cli, OutputFormat, Script};
+use crate::cli::{Cli, Script};
 use crate::common_tools::{pages, xml_escape};
 use clap::Parser;
 use regex::{Regex, RegexBuilder};
 use serde_json::{Map, Value};
 use chrono::DateTime;
+use crate::common_tools;
 
 #[derive(Parser)]
 #[command(version = "0.2.0")]
@@ -48,29 +49,24 @@ pub struct ListPagesParameters {
 }
 
 pub async fn list_pages_subscript(global_data: &Cli, script_data: &ListPagesParameters, info: String) -> Vec<Value> {
-    let source_contains: Vec<Regex> = script_data.source_contains.iter().map(|regex|
+    let regexes_in_source: Vec<Regex> = script_data.source_contains.iter().map(|regex|
         RegexBuilder::new(regex.as_str()).case_insensitive(script_data.source_contains_ignore_case).build().unwrap_or_else(
             |e| panic!("Error: bad regex ({e})")
         )
     ).collect();
 
-    let filter_and = script_data.all_tags.iter().fold("".to_string(), |acc, tag| {
+    let crom_recursive_query_builder = |operation| move |acc: String, tag| {
         let tag_filter = format!("{{ tags: {{ eq: \"{tag}\" }} }}");
         if acc.is_empty() {
             tag_filter
         } else {
-            format!("{{ _and: [{tag_filter}, {acc}] }}")
+            format!("{{ _{operation}: [{tag_filter}, {acc}] }}")
         }
-    });
+    };
 
-    let filter_or = script_data.one_of_tags.iter().fold("".to_string(), |acc, tag| {
-        let tag_filter = format!("{{ tags: {{ eq: \"{tag}\" }} }}");
-        if acc.is_empty() {
-            tag_filter
-        } else {
-            format!("{{ _or: [{tag_filter}, {acc}] }}")
-        }
-    });
+    let filter_and = script_data.all_tags.iter().fold("".to_string(), crom_recursive_query_builder("and"));
+
+    let filter_or = script_data.one_of_tags.iter().fold("".to_string(), crom_recursive_query_builder("or"));
 
     let filter = match (filter_or.as_str(), filter_and.as_str()) {
         ("", "") => None,
@@ -78,34 +74,34 @@ pub async fn list_pages_subscript(global_data: &Cli, script_data: &ListPagesPara
         (or, and) => Some(format!("{{ _and: [ {and}, {or} ] }}"))
     };
 
+
+
     println!("Querying crom to list the pages…");
-    pages(&global_data.verbose, global_data.site.as_ref().unwrap(), filter, script_data.author.as_ref(), info.to_string(), script_data.gather_fragments_sources, script_data.content).await.into_iter().filter(|page|
-        page.get("wikidotInfo")
-            .and_then(|wikidot_info| wikidot_info.get("source")
-                .and_then(|source|
+    pages(global_data.verbose, global_data.site.as_ref().unwrap(), filter, script_data.author.as_ref(), info.to_string(), script_data.gather_fragments_sources, script_data.content).await.into_iter()
+        .filter(|page|
+            page.get("wikidotInfo")
+                .and_then(|wikidot_info| wikidot_info.get("source"))
+                .and_then(|source: &Value| {
+                    /* Separated for clarity */
+                    let matches_source_regexes = |source|{
+                        let source_contains_criteria = |criteria: &Regex| criteria.is_match(source);
+                        if script_data.source_contains_one {
+                            regexes_in_source.iter().any(source_contains_criteria)
+                        } else {
+                            regexes_in_source.iter().all(source_contains_criteria)
+                        }
+                    };
                     if source.is_null() {
                         eprintln!("Warning [Crom problem]: source is null. JSON: {page}");
                         Some(false)
                     } else {
-                        source.as_str()
-                            .and_then(|source| {
-                                let source_contains_criteria = |criteria: &Regex| {
-                                    criteria.is_match(source)
-                                };
-                                Some(if script_data.source_contains_one {
-                                    source_contains.iter().any(source_contains_criteria)
-                                } else {
-                                    source_contains.iter().all(source_contains_criteria)
-                                })
-                            })
+                        source.as_str().map(matches_source_regexes)
                     }
-                )
-            )
-            .unwrap_or_else(|| {
-                assert!(source_contains.is_empty(), "Error: source not found but --source-contains specified. JSON: {page}");
-                true
-            })
-    ).collect()
+                }).unwrap_or_else(|| {
+                    assert!(regexes_in_source.is_empty(), "Error: source not found but --source-contains specified. JSON: {page}");
+                    true
+                })
+        ).collect()
 }
 
 #[derive(Debug)]
@@ -268,16 +264,7 @@ pub async fn list_pages(mut script_data: Cli) {
     let path = script_data.output.path().clone();
 
     if !params.txm {
-        match script_data.output_format {
-            OutputFormat::JSON => {
-                serde_json::to_writer_pretty(script_data.output, &result)
-                    .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));
-            }
-            OutputFormat::YAML => {
-                serde_yaml::to_writer(script_data.output, &result)
-                    .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));
-            }
-        }
+        common_tools::write_out(script_data, &result);
     } else {
         _txm_output(script_data.output, &result)
             .unwrap_or_else(|e| panic!("Error writing into output file: {e}"));
@@ -287,3 +274,4 @@ pub async fn list_pages(mut script_data: Cli) {
     println!("Results written in file {}", path);
 
 }
+

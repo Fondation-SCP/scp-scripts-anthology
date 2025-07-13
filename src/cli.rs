@@ -1,7 +1,7 @@
-use clap::{Parser, ValueEnum};
-use clap::Subcommand;
-use clio::Output;
 use crate::{forum_dl, list_pages};
+use clap::Subcommand;
+use clap::{Parser, ValueEnum};
+use clio::Output;
 
 #[derive(Debug, PartialEq, ValueEnum, Clone)]
 pub enum Branch {
@@ -16,14 +16,15 @@ impl Branch {
             Self::FR => "http://fondationscp.wikidot.com/",
             Self::EN => "http://scp-wiki.wikidot.com/",
             Self::INT => "http://scp-int.wikidot.com/",
-        }.to_string()
+        }
+        .to_string()
     }
 }
 
 #[derive(Debug, PartialEq, ValueEnum, Clone)]
 pub enum OutputFormat {
     JSON,
-    YAML
+    YAML,
 }
 
 #[derive(Subcommand)]
@@ -31,14 +32,20 @@ pub enum Script {
     /// Selects pages with selected criteria and downloads multiple information about them.
     ListPages(list_pages::ListPagesParameters),
     /// Downloads the forum of a Wikidot wiki.
-    ForumDl(forum_dl::ForumDlParameters)
+    ForumDl(forum_dl::ForumDlParameters),
 }
 
 #[derive(Parser)]
 #[command(version)]
 pub struct Cli {
     /// The branch you want to use the script on. Overrides --site.
-    #[arg(value_enum, short, long, required_unless_present = "site", ignore_case = true)]
+    #[arg(
+        value_enum,
+        short,
+        long,
+        required_unless_present = "site",
+        ignore_case = true
+    )]
     pub branch: Option<Branch>,
     /// The wikidot website you want to use the script on. Don't forget "/" at the end.
     #[arg(short, long, required_unless_present = "branch")]
@@ -50,7 +57,13 @@ pub struct Cli {
     #[arg(short, long, default_value = "-")]
     pub output: Output,
     /// The format of the output.
-    #[arg(value_enum, short = 'f', long, default_value = "yaml", ignore_case = true)]
+    #[arg(
+        value_enum,
+        short = 'f',
+        long,
+        default_value = "yaml",
+        ignore_case = true
+    )]
     pub output_format: OutputFormat,
     /// Number of parallel threads.
     #[arg(short = 'm', long, default_value = "4")]

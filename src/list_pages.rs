@@ -43,7 +43,7 @@ pub struct ListPagesParameters {
     /// Sets default parameters to scrap the website for analysis with TXM. Overrides --content, --gather-fragment-sources, --format. Disables --source-contains.
     #[arg(long, default_value = "false")]
     txm: bool,
-    /// Lists the files of listed pages
+    /// [REQUIRES CHROMIUM] Lists the files of listed pages
     #[arg(long, short, default_value = "false")]
     files: bool,
 }

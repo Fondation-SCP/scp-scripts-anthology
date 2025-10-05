@@ -1,6 +1,7 @@
+use chromiumoxide::{Browser, BrowserConfig};
 use crate::cli::{Cli, OutputFormat};
 use futures_util::future::join_all;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt};
 use reqwest::header::USER_AGENT;
 use scraper::{ElementRef, Html, Selector};
 use serde::Serialize;
@@ -132,8 +133,8 @@ fn _parse_content(webpage: &String) -> Option<String> {
     )
 }
 
-/// Downloads a singular webpage
-async fn _download_webpage(url: &String) -> Option<String> {
+/// Downloads a singular webpage.
+async fn _download_webpage(url: &str) -> Option<String> {
     /* Downloading html */
     let mut retries = -1;
     let client = reqwest::Client::new();
@@ -175,6 +176,27 @@ async fn _download_webpage(url: &String) -> Option<String> {
     }
 }
 
+async fn _download_webpage_browser(url: &str, browser: &Browser) -> Option<String> {
+    // Put it in a closure so I can use the ? macro for readability.
+    let f = async || {
+        let page = browser.new_page(url).await?;
+        page.find_element("a#files-button").await?.click().await?;
+
+        let html = page.wait_for_navigation().await?.content().await?;
+        page.close().await?;
+
+        Ok::<_, Box<dyn std::error::Error>>(html)
+    };
+
+    match f().await {
+        Ok(r) => Some(r),
+        Err(e) => {
+            eprintln!("Warning: couldn't download with browser page {e}.");
+            None
+        }
+    }
+}
+
 fn _list_children(page: &Value) -> Vec<&Value> {
     page.get("wikidotInfo")
         .and_then(|wikidotinfo| wikidotinfo.get("children"))
@@ -203,6 +225,7 @@ async fn _crom_pages(
     gather_fragments_sources: bool,
     download_content: bool,
     get_files: bool,
+    browser: &Option<Browser>,
     after: Option<&str>,
 ) -> Vec<Value> {
     let query = _build_crom_query(&site, &filter, &author, &requested_data, &after);
@@ -245,7 +268,7 @@ async fn _crom_pages(
     if gather_fragments_sources || download_content || get_files {
         join_all(
             pages.iter_mut().map(|page| {
-                _add_new_data(verbose, gather_fragments_sources, download_content, get_files, page)
+                _add_new_data(verbose, gather_fragments_sources, download_content, get_files, browser, page)
             }),
         )
         .await;
@@ -277,6 +300,7 @@ async fn _crom_pages(
                     gather_fragments_sources,
                     download_content,
                     get_files,
+                    browser,
                     Some(next_page),
                 ))
                 .await,
@@ -292,6 +316,7 @@ async fn _add_new_data(
     gather_fragments_sources: bool,
     download_content: bool,
     get_files: bool,
+    browser: &Option<Browser>,
     page: &mut Value,
 ) {
     assert!(
@@ -321,8 +346,9 @@ async fn _add_new_data(
             .reduce(|collector, part| collector + "\n" + part.as_str());
     }
 
+    // If not get_files, can download the page without a browser.
     if download_content || get_files {
-        let pages = _download_entry(page, children).await;
+        let pages = _download_entry(page, children, browser).await;
 
         if download_content {
             if let Some(newcontent) = pages.get(0).and_then(_parse_content) {
@@ -347,7 +373,7 @@ async fn _add_new_data(
 }
 
 /// Downloads all pages referenced by an entry (page + eventual children).
-async fn _download_entry(page: &Value, children: Vec<&Value>) -> Vec<String> {
+async fn _download_entry(page: &Value, children: Vec<&Value>, browser: &Option<Browser>) -> Vec<String> {
     let title = page
         .get("wikidotInfo")
         .and_then(|wikidotinfo| wikidotinfo.get("title"));
@@ -355,9 +381,18 @@ async fn _download_entry(page: &Value, children: Vec<&Value>) -> Vec<String> {
         println!("Downloading webpage(s) of {title}");
     }
 
+    // Merges the two ways of downloading in a single function to avoid duplicate code later.
+    let download_webpage = async |url| {
+        if let Some(browser) = browser {
+            _download_webpage_browser(url, browser).await
+        } else {
+            _download_webpage(url).await
+        }
+    };
+
     if !children.is_empty() {
         let newcontent = join_all(children.iter().map(async |fragment| {
-            _download_webpage(&fragment.get("url").unwrap().as_str().unwrap().to_string()).await
+            download_webpage(fragment.get("url").unwrap().as_str().unwrap()).await
         }))
         .await;
         if newcontent.iter().any(|frag| frag.is_none()) {
@@ -365,7 +400,7 @@ async fn _download_entry(page: &Value, children: Vec<&Value>) -> Vec<String> {
         }
         newcontent
     } else {
-        vec![_download_webpage(&page.get("url").unwrap().as_str().unwrap().to_string()).await]
+        vec![download_webpage(page.get("url").unwrap().as_str().unwrap()).await]
     }.into_iter().map(|x| x.unwrap_or(String::new())).collect() // Changes None Strings to empty Strings
 }
 
@@ -456,9 +491,24 @@ pub async fn pages(
     requested_data: String,
     gather_fragments_sources: bool,
     download_content: bool,
-    get_pages: bool,
+    get_files: bool,
 ) -> Vec<Value> {
-    _crom_pages(
+    let (browser, handler) = if get_files {
+        let (browser, mut handler) = Browser::launch(BrowserConfig::builder().build().expect("Failed to build a Browser to get the files"))
+            .await.expect("Failed to launch a Browser to get the files");
+        let handler = tokio::task::spawn(async move {
+            while let Some(h) = handler.next().await {
+                if h.is_err() {
+                    break;
+                }
+            }
+        });
+        (Some(browser), Some(handler))
+    } else {
+        (None, None)
+    };
+
+    let result = _crom_pages(
         verbose,
         site,
         filter,
@@ -466,10 +516,20 @@ pub async fn pages(
         requested_data,
         gather_fragments_sources,
         download_content,
-        get_pages,
+        get_files,
+        &browser,
         None,
     )
-    .await
+    .await;
+
+    if let (Some(browser), Some(handler)) = (browser, handler) {
+        if let Err(e) = browser.close().await {
+            eprintln!("Warning: failed to close the browser: {}", e);
+        }
+        let _ = handler.await;
+    }
+
+    result
 }
 
 pub fn xml_escape(s: &str) -> String {

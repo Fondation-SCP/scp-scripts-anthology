@@ -98,6 +98,41 @@ pub async fn query_crom(request: &String) -> Value {
     }
 }
 
+/// Exctracts the main content of a Wikidot webpage
+fn _parse_content(webpage: &String) -> Option<String> {
+    let page_content_sel = Selector::parse("#page-content").unwrap();
+    let doc = Html::parse_document(webpage);
+    let Some(doc) = doc.select(&page_content_sel).next() else {
+        eprintln!("#page-content not found.");
+        return None;
+    };
+
+    let deletion_selectors = vec![
+        Selector::parse(".creditRate"),
+        Selector::parse(".code"),
+        Selector::parse(".footer-wikiwalk-nav"),
+    ]
+        .into_iter()
+        .map(|selector| selector.unwrap());
+
+    let delete_element =
+        |collector: String, element: ElementRef| collector.replace(&element.html(), "");
+
+    Some(
+        Html::parse_fragment(
+            deletion_selectors
+                .fold(doc.html(), |collector, selector| {
+                    doc.select(&selector).fold(collector, delete_element)
+                })
+                .as_str(),
+        )
+            .root_element()
+            .text()
+            .collect(),
+    )
+}
+
+/// Downloads a singular webpage
 async fn _download_webpage(url: &String) -> Option<String> {
     /* Downloading html */
     let mut retries = -1;
@@ -130,45 +165,13 @@ async fn _download_webpage(url: &String) -> Option<String> {
             }
         };
 
-        let html = match response.text().await {
-            Ok(h) => h,
+        match response.text().await {
+            Ok(h) => break Some(h),
             Err(e) => {
                 eprintln!("Format error: {e}.");
                 continue;
             }
-        };
-
-        /* Extracting content */
-        let page_content_sel = Selector::parse("#page-content").unwrap();
-        let doc = Html::parse_document(html.as_str());
-        let Some(doc) = doc.select(&page_content_sel).next() else {
-            eprintln!("#page-content not found.");
-            continue;
-        };
-
-        let deletion_selectors = vec![
-            Selector::parse(".creditRate"),
-            Selector::parse(".code"),
-            Selector::parse(".footer-wikiwalk-nav"),
-        ]
-        .into_iter()
-        .map(|selector| selector.unwrap());
-
-        let delete_element =
-            |collector: String, element: ElementRef| collector.replace(&element.html(), "");
-
-        break Some(
-            Html::parse_fragment(
-                deletion_selectors
-                    .fold(doc.html(), |collector, selector| {
-                        doc.select(&selector).fold(collector, delete_element)
-                    })
-                    .as_str(),
-            )
-            .root_element()
-            .text()
-            .collect(),
-        );
+        }
     }
 }
 
@@ -199,6 +202,7 @@ async fn _crom_pages(
     requested_data: String,
     gather_fragments_sources: bool,
     download_content: bool,
+    get_files: bool,
     after: Option<&str>,
 ) -> Vec<Value> {
     let query = _build_crom_query(&site, &filter, &author, &requested_data, &after);
@@ -238,10 +242,10 @@ async fn _crom_pages(
         })
         .collect();
 
-    if gather_fragments_sources || download_content {
+    if gather_fragments_sources || download_content || get_files {
         join_all(
             pages.iter_mut().map(|page| {
-                _add_new_data(verbose, gather_fragments_sources, download_content, page)
+                _add_new_data(verbose, gather_fragments_sources, download_content, get_files, page)
             }),
         )
         .await;
@@ -272,6 +276,7 @@ async fn _crom_pages(
                     requested_data,
                     gather_fragments_sources,
                     download_content,
+                    get_files,
                     Some(next_page),
                 ))
                 .await,
@@ -286,6 +291,7 @@ async fn _add_new_data(
     verbose: bool,
     gather_fragments_sources: bool,
     download_content: bool,
+    get_files: bool,
     page: &mut Value,
 ) {
     assert!(
@@ -315,13 +321,15 @@ async fn _add_new_data(
             .reduce(|collector, part| collector + "\n" + part.as_str());
     }
 
-    if download_content {
-        if let Some(newcontent) = _download_content(page, children).await {
-            page.as_object_mut()
-                .unwrap()
-                .insert("content".to_string(), Value::String(newcontent));
-        } else {
-            eprintln!("Warning: no content available for page: {}", page);
+    if download_content || get_files {
+        let pages = _download_entry(page, children).await;
+
+        if download_content {
+            if let Some(newcontent) = pages.get(0).and_then(_parse_content) {
+                page.as_object_mut().unwrap().insert("content".to_string(), Value::String(newcontent));
+            } else {
+                eprintln!("Warning: could not download or parse content for page {}.", page);
+            }
         }
     }
 
@@ -338,12 +346,13 @@ async fn _add_new_data(
     }
 }
 
-async fn _download_content(page: &Value, children: Vec<&Value>) -> Option<String> {
+/// Downloads all pages referenced by an entry (page + eventual children).
+async fn _download_entry(page: &Value, children: Vec<&Value>) -> Vec<String> {
     let title = page
         .get("wikidotInfo")
         .and_then(|wikidotinfo| wikidotinfo.get("title"));
     if let Some(title) = title {
-        println!("Downloading content of {title}");
+        println!("Downloading webpage(s) of {title}");
     }
 
     if !children.is_empty() {
@@ -352,15 +361,12 @@ async fn _download_content(page: &Value, children: Vec<&Value>) -> Option<String
         }))
         .await;
         if newcontent.iter().any(|frag| frag.is_none()) {
-            eprintln!("Warning: error when retrieving content for page: {}", page);
+            eprintln!("Warning: some fragments for page {} could not be downloaded or parsed.", page);
         }
         newcontent
-            .into_iter()
-            .filter_map(|x| x)
-            .reduce(|collector, part| collector + part.as_str())
     } else {
-        _download_webpage(&page.get("url").unwrap().as_str().unwrap().to_string()).await
-    }
+        vec![_download_webpage(&page.get("url").unwrap().as_str().unwrap().to_string()).await]
+    }.into_iter().map(|x| x.unwrap_or(String::new())).collect() // Changes None Strings to empty Strings
 }
 
 async fn _gather_fragment_source(verbose: bool, fragment: &&Value) -> String {
@@ -450,6 +456,7 @@ pub async fn pages(
     requested_data: String,
     gather_fragments_sources: bool,
     download_content: bool,
+    get_pages: bool,
 ) -> Vec<Value> {
     _crom_pages(
         verbose,
@@ -459,6 +466,7 @@ pub async fn pages(
         requested_data,
         gather_fragments_sources,
         download_content,
+        get_pages,
         None,
     )
     .await

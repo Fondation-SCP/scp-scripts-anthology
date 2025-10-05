@@ -100,6 +100,7 @@ pub async fn list_pages_subscript(
         info.to_string(),
         script_data.gather_fragments_sources,
         script_data.content,
+        script_data.files,
     )
     .await
     .into_iter()

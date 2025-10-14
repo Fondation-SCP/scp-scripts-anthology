@@ -4,7 +4,7 @@ use futures_util::future::join_all;
 use futures_util::{FutureExt, StreamExt};
 use reqwest::header::USER_AGENT;
 use scraper::{ElementRef, Html, Selector};
-use serde::Serialize;
+use serde::{Serialize};
 use serde_json::Value;
 
 async fn _wait_for_ratelimit(client: &reqwest::Client, crom_url: &str) {
@@ -100,9 +100,8 @@ pub async fn query_crom(request: &String) -> Value {
 }
 
 /// Exctracts the main content of a Wikidot webpage
-fn _parse_content(webpage: &String) -> Option<String> {
+fn _parse_content(doc: &Html) -> Option<String> {
     let page_content_sel = Selector::parse("#page-content").unwrap();
-    let doc = Html::parse_document(webpage);
     let Some(doc) = doc.select(&page_content_sel).next() else {
         eprintln!("#page-content not found.");
         return None;
@@ -131,6 +130,67 @@ fn _parse_content(webpage: &String) -> Option<String> {
             .text()
             .collect(),
     )
+}
+
+#[derive(Debug)]
+struct File {
+    name: String,
+    file_type: String,
+    size: i32
+}
+
+impl Into<Value> for File {
+    fn into(self) -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("name".to_string(), Value::String(self.name));
+        obj.insert("file_type".to_string(), Value::String(self.file_type));
+        obj.insert("size".to_string(), Value::Number(self.size.into()));
+        Value::Object(obj)
+    }
+}
+
+fn _parse_file_size(str: &str) -> f32 {
+    let mut parts = str.split(" ");
+    parts.next().unwrap_or_else(|| {eprintln!("Can't split file size."); ""}).parse::<f32>().map(|size|
+        size * match parts.next() {
+            Some("kB") => 1000.,
+            Some("MB") => 10000000.,
+            Some("Bytes") => 1.,
+            Some(u) => {
+                eprintln!("Unknown unit {u}.");
+                1.
+            },
+            None => {
+                eprintln!("No unit found: {str}");
+                1.
+            }
+    }).unwrap_or_else(|err| {eprintln!("Can't parse size: {str}: {err}."); 0.})
+}
+
+fn _file_list(doc: &Html) -> Vec<File> {
+    let file_list_selector = Selector::parse("table.page-files tbody").unwrap();
+    let Some(file_list) = doc.select(&file_list_selector).next() else {
+        return vec![]; // No files
+    };
+
+    file_list.children().filter_map(ElementRef::wrap).map(|line| {
+        println!("-----------");
+        let cells = line.children().filter_map(ElementRef::wrap).collect::<Vec<_>>();
+        File {
+            name : cells.get(0)
+                .and_then(|cell| cell.children().filter_map(ElementRef::wrap).next())
+                .map(|cell| cell.inner_html())
+                .unwrap_or(String::new()),
+            file_type : cells.get(1)
+                .and_then(|cell| cell.children().filter_map(ElementRef::wrap).next())
+                .map(|cell| cell.inner_html())
+                .unwrap_or(String::new()),
+            size: cells.get(2)
+                .map(|cell| _parse_file_size(cell.inner_html().trim()))
+                .unwrap_or(0.).round() as i32,
+        }
+    }).collect()
+
 }
 
 /// Downloads a singular webpage.
@@ -180,8 +240,14 @@ async fn _download_webpage_browser(url: &str, browser: &Browser) -> Option<Strin
     // Put it in a closure so I can use the ? macro for readability.
     let f = async || {
         let page = browser.new_page(url).await?;
-        page.find_element("a#files-button").await?.click().await?;
-
+        page.evaluate("WIKIDOT.page.listeners.filesClick();").await?;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // If the action area has content
+            if !page.find_element("#action-area").await?.find_elements("a").await?.is_empty() {
+                break;
+            }
+        }
         let html = page.wait_for_navigation().await?.content().await?;
         page.close().await?;
 
@@ -191,7 +257,7 @@ async fn _download_webpage_browser(url: &str, browser: &Browser) -> Option<Strin
     match f().await {
         Ok(r) => Some(r),
         Err(e) => {
-            eprintln!("Warning: couldn't download with browser page {e}.");
+            eprintln!("Warning: couldn't download with browser page. Cause: {e}.");
             None
         }
     }
@@ -346,16 +412,21 @@ async fn _add_new_data(
             .reduce(|collector, part| collector + "\n" + part.as_str());
     }
 
-    // If not get_files, can download the page without a browser.
     if download_content || get_files {
         let pages = _download_entry(page, children, browser).await;
-
-        if download_content {
-            if let Some(newcontent) = pages.get(0).and_then(_parse_content) {
+        if let Some(html) = pages.get(0).map(|s| Html::parse_document(s.as_str())) {
+            if download_content {
+                let newcontent = _parse_content(&html).unwrap_or(String::new());
                 page.as_object_mut().unwrap().insert("content".to_string(), Value::String(newcontent));
-            } else {
-                eprintln!("Warning: could not download or parse content for page {}.", page);
             }
+
+            if get_files {
+                let file_list: Vec<Value> = _file_list(&html).into_iter().map(|x| x.into()).collect();
+                page.as_object_mut().unwrap().insert("files".to_string(), Value::Array(file_list));
+            }
+
+        } else {
+            eprintln!("Warning: could not download or parse content for page {}.", page);
         }
     }
 
@@ -503,6 +574,14 @@ pub async fn pages(
                 }
             }
         });
+        let page = browser.new_page("https://www.wikidot.com/default--flow/login__LoginPopupScreen").await
+            .expect("Can't connect to wikidot login page.");
+        let fields = page.find_elements("input").await.unwrap();
+        // TODO: add a feature to enter username and password and to crash if it can't connect
+        fields[0].click().await.unwrap().type_str("username").await.unwrap();
+        fields[1].click().await.unwrap().type_str(r#"password"#).await.unwrap();
+        page.find_element("button").await.unwrap().click().await.unwrap();
+        page.wait_for_navigation().await.unwrap();
         (Some(browser), Some(handler))
     } else {
         (None, None)

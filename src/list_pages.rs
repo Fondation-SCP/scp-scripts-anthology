@@ -23,8 +23,6 @@ pub struct ListPagesParameters {
     /// Searches within the pages attributed to the given author.
     #[arg(long, short)]
     author: Option<String>,
-    /*#[arg(skip)]
-    txt_output_format: String,*/
     /// Downloads the contents of each page from the HTML page.
     #[arg(long, default_value = "false")]
     content: bool,

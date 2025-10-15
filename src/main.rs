@@ -2,12 +2,14 @@ mod cli;
 mod common_tools;
 mod forum_dl;
 mod list_pages;
+mod list_files;
 
 use crate::forum_dl::forum_dl;
 use crate::list_pages::list_pages;
 use clap::Parser;
 use cli::Cli;
 use cli::Script;
+use crate::list_files::list_files;
 /*
 Parse the parameters into a vector of parameters + arguments.
  */
@@ -62,5 +64,6 @@ async fn main() {
     match args.script {
         Script::ListPages(_) => list_pages(args).await,
         Script::ForumDl(_) => forum_dl(args).await,
+        Script::ListFiles(_) => list_files(args).await,
     }
 }

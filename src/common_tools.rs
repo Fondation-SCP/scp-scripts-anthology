@@ -137,10 +137,10 @@ fn _parse_content(doc: &Html) -> Option<String> {
 }
 
 #[derive(Debug)]
-struct File {
-    name: String,
-    file_type: String,
-    size: i32
+pub struct File {
+    pub name: String,
+    pub file_type: String,
+    pub size: i32
 }
 
 impl Into<Value> for File {
@@ -171,7 +171,7 @@ fn _parse_file_size(str: &str) -> f32 {
     }).unwrap_or_else(|err| {eprintln!("Can't parse size: {str}: {err}."); 0.})
 }
 
-fn _file_list(doc: &Html) -> Vec<File> {
+pub fn file_list(doc: &Html) -> Vec<File> {
     let file_list_selector = Selector::parse("table.page-files tbody").unwrap();
     let Some(file_list) = doc.select(&file_list_selector).next() else {
         return vec![]; // No files
@@ -239,7 +239,7 @@ async fn _download_webpage(url: &str) -> Option<String> {
     }
 }
 
-async fn _download_webpage_browser(url: &str, browser: &Browser) -> Option<String> {
+pub async fn download_webpage_browser(url: &str, browser: &Browser) -> Option<String> {
     // Put it in a closure so I can use the ? macro for readability.
     let f = async || {
         let page = browser.new_page(url).await?;
@@ -429,7 +429,7 @@ async fn _add_new_data(
             }
 
             if get_files {
-                let file_list: Vec<Value> = _file_list(&html).into_iter().map(|x| x.into()).collect();
+                let file_list: Vec<Value> = file_list(&html).into_iter().map(|x| x.into()).collect();
                 page.as_object_mut().unwrap().insert("files".to_string(), Value::Array(file_list));
             }
 
@@ -463,7 +463,7 @@ async fn _download_entry(page: &Value, children: Vec<&Value>, browser: Option<&B
     // Merges the two ways of downloading in a single function to avoid duplicate code later.
     let download_webpage = async |url| {
         if let Some(browser) = browser {
-            _download_webpage_browser(url, browser).await
+            download_webpage_browser(url, browser).await
         } else {
             _download_webpage(url).await
         }
@@ -562,7 +562,7 @@ fn _build_crom_query(
     }
 }
 
-async fn _open_browser() -> (Browser, JoinHandle<()>) {
+pub async fn open_browser() -> (Browser, JoinHandle<()>) {
     let (browser, mut handler) = Browser::launch(BrowserConfig::builder().build().expect("Failed to build a Browser to get the files"))
         .await.expect("Failed to launch a Browser to get the files");
     let handler = tokio::task::spawn(async move {
@@ -592,12 +592,12 @@ async fn _open_browser() -> (Browser, JoinHandle<()>) {
     (browser, handler)
 }
 
-async fn _close_browser((browser, handler): (Browser, JoinHandle<()>)) {
+pub async fn close_browser((browser, handle): (Browser, JoinHandle<()>)) {
     browser.clear_cookies().await
         .inspect_err(|e| {eprintln!("[WARNING] Browser cookies clearing failed: {e}"); }).unwrap_or_default();
     browser.close().await
         .inspect_err(|e| {eprintln!("[WARNING] Failed to close the browser: {e}");}).unwrap_or_default();
-    handler.await.unwrap_or_default();
+    handle.await.unwrap_or_default();
 }
 
 pub async fn pages(
@@ -611,7 +611,7 @@ pub async fn pages(
     get_files: bool,
 ) -> Vec<Value> {
 
-    let browser_handler = if get_files { Some(_open_browser().await) } else { None };
+    let browser_handler = if get_files { Some(open_browser().await) } else { None };
 
     let result = _crom_pages(
         verbose,
@@ -628,7 +628,7 @@ pub async fn pages(
     .await;
 
     if let Some(browser_handler) = browser_handler {
-        _close_browser(browser_handler).await;
+        close_browser(browser_handler).await;
     }
 
     result
@@ -651,7 +651,7 @@ pub async fn download_html(
     loop {
         let response = client
             .get(url)
-            .header(USER_AGENT, "ScpScriptAnthology/1.0")
+            .header(USER_AGENT, "ScpScriptsAnthology/1.0")
             .send()
             .then(async |r| match r {
                 Ok(r) => r.text().await,

@@ -1,11 +1,15 @@
+use std::io;
+use std::io::Write;
 use chromiumoxide::{Browser, BrowserConfig};
 use crate::cli::{Cli, OutputFormat};
 use futures_util::future::join_all;
 use futures_util::{FutureExt, StreamExt};
 use reqwest::header::USER_AGENT;
+use rpassword::read_password;
 use scraper::{ElementRef, Html, Selector};
 use serde::{Serialize};
 use serde_json::Value;
+use tokio::task::JoinHandle;
 
 async fn _wait_for_ratelimit(client: &reqwest::Client, crom_url: &str) {
     let mut retries = 0;
@@ -174,7 +178,6 @@ fn _file_list(doc: &Html) -> Vec<File> {
     };
 
     file_list.children().filter_map(ElementRef::wrap).map(|line| {
-        println!("-----------");
         let cells = line.children().filter_map(ElementRef::wrap).collect::<Vec<_>>();
         File {
             name : cells.get(0)
@@ -241,12 +244,17 @@ async fn _download_webpage_browser(url: &str, browser: &Browser) -> Option<Strin
     let f = async || {
         let page = browser.new_page(url).await?;
         page.evaluate("WIKIDOT.page.listeners.filesClick();").await?;
+        let mut youre_taking_too_long = 30;
         loop {
+            youre_taking_too_long -= 1;
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             // If the action area has content
-            if !page.find_element("#action-area").await?.find_elements("a").await?.is_empty() {
+            if !page.find_element("#action-area").await?.find_elements("a").await?.is_empty() || youre_taking_too_long == 0 {
                 break;
             }
+        }
+        if youre_taking_too_long == 0 {
+            eprintln!("[WARNING] No action area found for {url}. Your login attempt may might have been unsuccessful.");
         }
         let html = page.wait_for_navigation().await?.content().await?;
         page.close().await?;
@@ -291,7 +299,7 @@ async fn _crom_pages(
     gather_fragments_sources: bool,
     download_content: bool,
     get_files: bool,
-    browser: &Option<Browser>,
+    browser: Option<&Browser>,
     after: Option<&str>,
 ) -> Vec<Value> {
     let query = _build_crom_query(&site, &filter, &author, &requested_data, &after);
@@ -382,7 +390,7 @@ async fn _add_new_data(
     gather_fragments_sources: bool,
     download_content: bool,
     get_files: bool,
-    browser: &Option<Browser>,
+    browser: Option<&Browser>,
     page: &mut Value,
 ) {
     assert!(
@@ -444,7 +452,7 @@ async fn _add_new_data(
 }
 
 /// Downloads all pages referenced by an entry (page + eventual children).
-async fn _download_entry(page: &Value, children: Vec<&Value>, browser: &Option<Browser>) -> Vec<String> {
+async fn _download_entry(page: &Value, children: Vec<&Value>, browser: Option<&Browser>) -> Vec<String> {
     let title = page
         .get("wikidotInfo")
         .and_then(|wikidotinfo| wikidotinfo.get("title"));
@@ -554,6 +562,44 @@ fn _build_crom_query(
     }
 }
 
+async fn _open_browser() -> (Browser, JoinHandle<()>) {
+    let (browser, mut handler) = Browser::launch(BrowserConfig::builder().build().expect("Failed to build a Browser to get the files"))
+        .await.expect("Failed to launch a Browser to get the files");
+    let handler = tokio::task::spawn(async move {
+        while let Some(h) = handler.next().await {
+            if h.is_err() {
+                break;
+            }
+        }
+    });
+    let mut username = String::new();
+    print!("Wikidot username: ");
+    io::stdout().flush().unwrap();
+    io::stdin().read_line(&mut username).expect("Failed to read the username.");
+    username = username.trim().to_string();
+    print!("Password:");
+    io::stdout().flush().unwrap();
+    let password = read_password().expect("Failed to read the password.").trim().to_string();
+
+    let page = browser.new_page("https://www.wikidot.com/default--flow/login__LoginPopupScreen").await
+        .expect("Can't connect to wikidot login page.");
+    let fields = page.find_elements("input").await.unwrap();
+
+    fields[0].click().await.unwrap().type_str(username).await.unwrap();
+    fields[1].click().await.unwrap().type_str(password).await.unwrap();
+    page.find_element("button").await.unwrap().click().await.unwrap();
+    page.wait_for_navigation().await.unwrap();
+    (browser, handler)
+}
+
+async fn _close_browser((browser, handler): (Browser, JoinHandle<()>)) {
+    browser.clear_cookies().await
+        .inspect_err(|e| {eprintln!("[WARNING] Browser cookies clearing failed: {e}"); }).unwrap_or_default();
+    browser.close().await
+        .inspect_err(|e| {eprintln!("[WARNING] Failed to close the browser: {e}");}).unwrap_or_default();
+    handler.await.unwrap_or_default();
+}
+
 pub async fn pages(
     verbose: bool,
     site: &String,
@@ -564,28 +610,8 @@ pub async fn pages(
     download_content: bool,
     get_files: bool,
 ) -> Vec<Value> {
-    let (browser, handler) = if get_files {
-        let (browser, mut handler) = Browser::launch(BrowserConfig::builder().build().expect("Failed to build a Browser to get the files"))
-            .await.expect("Failed to launch a Browser to get the files");
-        let handler = tokio::task::spawn(async move {
-            while let Some(h) = handler.next().await {
-                if h.is_err() {
-                    break;
-                }
-            }
-        });
-        let page = browser.new_page("https://www.wikidot.com/default--flow/login__LoginPopupScreen").await
-            .expect("Can't connect to wikidot login page.");
-        let fields = page.find_elements("input").await.unwrap();
-        // TODO: add a feature to enter username and password and to crash if it can't connect
-        fields[0].click().await.unwrap().type_str("username").await.unwrap();
-        fields[1].click().await.unwrap().type_str(r#"password"#).await.unwrap();
-        page.find_element("button").await.unwrap().click().await.unwrap();
-        page.wait_for_navigation().await.unwrap();
-        (Some(browser), Some(handler))
-    } else {
-        (None, None)
-    };
+
+    let browser_handler = if get_files { Some(_open_browser().await) } else { None };
 
     let result = _crom_pages(
         verbose,
@@ -596,16 +622,13 @@ pub async fn pages(
         gather_fragments_sources,
         download_content,
         get_files,
-        &browser,
+        browser_handler.as_ref().map(|(browser, _)| browser),
         None,
     )
     .await;
 
-    if let (Some(browser), Some(handler)) = (browser, handler) {
-        if let Err(e) = browser.close().await {
-            eprintln!("Warning: failed to close the browser: {}", e);
-        }
-        let _ = handler.await;
+    if let Some(browser_handler) = browser_handler {
+        _close_browser(browser_handler).await;
     }
 
     result

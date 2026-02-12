@@ -10,55 +10,13 @@ use clap::Parser;
 use cli::Cli;
 use cli::Script;
 use crate::list_files::list_files;
-/*
-Parse the parameters into a vector of parameters + arguments.
- */
-fn _parse_parameters(args: &Vec<String>) -> Vec<(&str, &str)> {
-    let (mut params, remains) =
-        args[2..]
-            .into_iter()
-            .fold((Vec::new(), None), |(chain, str), arg| match str {
-                Some(param) => {
-                    if arg.starts_with("-") {
-                        (
-                            chain
-                                .into_iter()
-                                .chain(std::iter::once((param, "")))
-                                .collect(),
-                            Some(arg.as_str()),
-                        )
-                    } else {
-                        (
-                            chain
-                                .into_iter()
-                                .chain(std::iter::once((param, arg.as_str())))
-                                .collect(),
-                            None,
-                        )
-                    }
-                }
-                None => {
-                    if arg.starts_with("-") {
-                        (chain, Some(arg.as_str()))
-                    } else {
-                        (chain, None)
-                    }
-                }
-            });
 
-    if let Some(remains) = remains {
-        params.push((remains, ""));
-    }
-
-    params
-}
-
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let mut args = Cli::parse();
 
     if let Some(branch) = args.branch.as_ref() {
-        args.site = Some(branch.get_url());
+        args.site = Some(branch.get_url().to_string());
     }
 
     match args.script {

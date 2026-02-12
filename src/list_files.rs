@@ -1,18 +1,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use clap::Parser;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use reqwest::Client;
 use scraper::{ElementRef, Html, Selector};
 use serde_json::Value;
 use crate::cli::{Cli, Script};
 use crate::common_tools;
+use crate::common_tools::FutureIterator;
 
 #[derive(Parser)]
 #[command(version = "0.1.0")]
 pub struct ListFilesParameters {
     /// Unix name of the page where the ListPages module listing the pages whose files you want to list is located., value_name = "URL"
-    listpages_location: String
+    listpages_location: String,
+    /// Shows the browser
+    #[arg(long, default_value = "false")]
+    no_headless: bool,
 }
 
 async fn _get_file_list_from_listpage_page(client: Arc<Client>, url: String, selectors: Arc<(Selector, Selector)>) -> Vec<String> {
@@ -57,49 +61,53 @@ pub async fn list_files(mut script_data: Cli) {
                                      Selector::parse("a").unwrap()
     ));
 
-    let page_list_futures = (1..=page_count).map(|page_nb| {
+    let page_list = (1..=page_count).map(|page_nb| {
         listpages_url.clone() + "/p/" + page_nb.to_string().as_str()
     })
         .map(|page_url| _get_file_list_from_listpage_page(arc_client.clone(), page_url, arc_selectors.clone()))
-        .collect::<Vec<_>>();
-
-    let page_list = tokio_stream::iter(page_list_futures)
-        .buffer_unordered(script_data.threads)
-        .collect::<Vec<_>>()
-        .await.into_iter().flatten().collect::<Vec<_>>();
-
-    println!("{} pages found.", page_list.len());
-
-    let (browser, handler) = common_tools::open_browser().await;
-    let arc_browser = Arc::new(browser);
-
-
-    let pages_html_futures = page_list.into_iter()
-        .map(async |url| {
-            println!("Downloading {url}");
-            common_tools::download_webpage_browser((site_url.clone() + url.as_str()).as_str(), arc_browser.clone().as_ref()).await
-                .map(|page_content| Html::parse_document(page_content.as_str()))
-                .map(|html| (url, common_tools::file_list(&html)))
-        }).collect::<Vec<_>>();
-
-    let pages_html = tokio_stream::iter(pages_html_futures)
+        .into_future_iter()
         .buffer_unordered(script_data.threads)
         .collect::<Vec<_>>()
         .await
         .into_iter()
-        .filter_map(|x| match x {
-            None => None,
-            Some((_, files)) if files.len() == 0 => None,
-            Some((url, files)) => {
+        .flatten()
+        .collect::<Vec<_>>();
+
+    println!("{} pages found.", page_list.len());
+
+    let (browser, handler) = common_tools::open_browser(!params.no_headless).await;
+    let arc_browser = Arc::new(browser);
+
+
+    let pages_html = page_list.into_iter()
+        .map(|url| async {
+            println!("Downloading {url}");
+            let page = common_tools::download_webpage_browser(
+                (site_url.clone() + url.as_str()).as_str(),
+                arc_browser.clone().as_ref()
+            ).await;
+            (url, page)
+        }.boxed()) /* Boxed because too big for the stack */
+        .into_future_iter()
+        .buffer_unordered(script_data.threads)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|(url, page_content)| page_content.map(|p| (url, p)))
+        .map(|(url, page_content)| (url, Html::parse_document(page_content.as_str())))
+        .map(|(url, html)| (url, common_tools::file_list(&html)))
+        .filter_map(|(url, files)| match files.as_slice() {
+            [] => None,
+            _ => {
                 let mut page = HashMap::new();
                 page.insert("url".to_string(), Value::String(url));
                 let page_size = files.iter().fold(0, |total, file| total + file.size);
                 page.insert("total size".to_string(), Value::Number(page_size.into()));
-                page.insert("files".to_string(), Value::Array(files.into_iter().map(|f| f.into()).collect()));
+                page.insert("files".to_string(), serde_json::to_value(files).unwrap());
                 Some(page)
             }
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>();     
 
     common_tools::close_browser((Arc::into_inner(arc_browser).unwrap(), handler)).await;
 

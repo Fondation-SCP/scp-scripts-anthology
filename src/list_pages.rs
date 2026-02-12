@@ -7,6 +7,8 @@ use regex::{Regex, RegexBuilder};
 use serde_json::{Map, Value};
 use std::fmt::Display;
 use std::io;
+use std::path::Path;
+use clio::Output;
 
 #[derive(Parser)]
 #[command(version = "0.2.0")]
@@ -26,6 +28,9 @@ pub struct ListPagesParameters {
     /// Downloads the contents of each page from the HTML page.
     #[arg(long, default_value = "false")]
     content: bool,
+    /// Downloads the full HTML of each page and stores it the given folder.
+    #[arg(long, default_value = "None")]
+    download_html: Option<String>,
     /// Downloads the sources of fragmented pages. Adds wikidotInfo.source to --info if not specified.
     #[arg(long, default_value = "false")]
     gather_fragments_sources: bool,
@@ -49,6 +54,7 @@ pub struct ListPagesParameters {
 pub async fn list_pages_subscript(
     global_data: &Cli,
     script_data: &ListPagesParameters,
+    download_html: Option<&Path>,
     info: String,
 ) -> Vec<Value> {
     let regexes_in_source: Vec<Regex> = script_data
@@ -98,6 +104,7 @@ pub async fn list_pages_subscript(
         info.to_string(),
         script_data.gather_fragments_sources,
         script_data.content,
+        download_html,
         script_data.files,
     )
     .await
@@ -176,7 +183,7 @@ fn _gciq_rec_fold(mut acc: Vec<QueryTree>, item: Vec<&str>) -> Vec<QueryTree> {
                     .into_iter()
                     .map(|node| {
                         if let QueryTree::MotherNode(str, vec) = node {
-                            if str == item.first().unwrap().to_string() {
+                            if str == *item.first().unwrap() {
                                 QueryTree::MotherNode(str, _gciq_rec_fold(vec, item[1..].to_vec()))
                             } else {
                                 QueryTree::MotherNode(str, vec)
@@ -210,7 +217,7 @@ fn _generate_crom_information_query(info_list: Vec<&str>) -> String {
         .fold(String::new(), |str, node| str + node.to_string().as_str())
 }
 
-fn _filter_value(filters: &Vec<QueryTree>, value: Map<String, Value>) -> Map<String, Value> {
+fn _filter_value(filters: &[QueryTree], value: Map<String, Value>) -> Map<String, Value> {
     value
         .into_iter()
         .filter_map(|(str, val)| {
@@ -225,15 +232,15 @@ fn _filter_value(filters: &Vec<QueryTree>, value: Map<String, Value>) -> Map<Str
                         }
                         _ => false,
                     })
-                    .and_then(|corresponding_filter| {
+                    .map(|corresponding_filter| {
                         if let Value::Object(obj) = val {
                             if let QueryTree::MotherNode(_, members) = corresponding_filter {
-                                Some((str, Value::Object(_filter_value(members, obj))))
+                                (str, Value::Object(_filter_value(members, obj)))
                             } else {
-                                Some((str, Value::Object(obj)))
+                                (str, Value::Object(obj))
                             }
                         } else {
-                            Some((str, val))
+                            (str, val)
                         }
                     })
             }
@@ -241,20 +248,20 @@ fn _filter_value(filters: &Vec<QueryTree>, value: Map<String, Value>) -> Map<Str
         .collect()
 }
 
-fn _txm_output<W: io::Write>(mut output: W, data: &Vec<Value>) -> Result<(), io::Error> {
+fn _txm_output<W: io::Write>(mut output: W, data: &[Value]) -> Result<(), io::Error> {
     let body = data.iter().map(|page| {
-        let source = xml_escape(page.get("content").and_then(|content| content.as_str()).expect(format!("Content absent but --txm used (internal error): {page}").as_str()));
-        let wikidotinfo = page.get("wikidotInfo").expect(format!("No wikidotInfo in data: {page}").as_str());
-        let title = xml_escape(wikidotinfo.get("title").and_then(|title| title.as_str()).expect(format!("No title in data: {page}").as_str()));
-        let rating = wikidotinfo.get("rating").and_then(|rating| rating.as_i64()).expect(format!("No rating in data: {page}").as_str());
-        let tags = xml_escape(wikidotinfo.get("tags").expect(format!("No tags in data but --txm used (internal error): {page}").as_str())
-            .as_array().expect(format!("tags is no array: {page}").as_str())
+        let source = xml_escape(page.get("content").and_then(|content| content.as_str()).unwrap_or_else(|| panic!("Content absent but --txm used (internal error): {page}")));
+        let wikidotinfo = page.get("wikidotInfo").unwrap_or_else(|| panic!("No wikidotInfo in data: {page}"));
+        let title = xml_escape(wikidotinfo.get("title").and_then(|title| title.as_str()).unwrap_or_else(|| panic!("No title in data: {page}")));
+        let rating = wikidotinfo.get("rating").and_then(|rating| rating.as_i64()).unwrap_or_else(|| panic!("No rating in data: {page}"));
+        let tags = xml_escape(wikidotinfo.get("tags").unwrap_or_else(|| panic!("No tags in data but --txm used (internal error): {page}"))
+            .as_array().unwrap_or_else(|| panic!("tags is no array: {page}"))
             .iter().map(|tag| tag.as_str().unwrap_or_default().to_string())
             .reduce(|acc, tag| acc + "," + tag.as_str()).unwrap_or_default().as_str());
         let date = wikidotinfo.get("createdAt")
             .and_then(|date| date.as_str())
             .and_then(|date_str| DateTime::parse_from_rfc3339(date_str).ok())
-            .expect(format!("date bad format: {page}").as_str());
+            .unwrap_or_else(|| panic!("date bad format: {page}"));
         let date_str = date.format("%Y-%m-%d").to_string();
         let time_str = date.format("%H:%M").to_string();
         let year_str = date.format("%Y").to_string();
@@ -264,7 +271,7 @@ fn _txm_output<W: io::Write>(mut output: W, data: &Vec<Value>) -> Result<(), io:
         let author = xml_escape(wikidotinfo.get("createdBy")
             .and_then(|cb| cb.get("name"))
             .and_then(|name| name.as_str())
-            .expect(format!("No author in data: {page}").as_str()));
+            .unwrap_or_else(|| panic!("No author in data: {page}")));
 
         format!("<ecrit title=\"{title}\" rating=\"{rating}\" date=\"{date_str}\" time=\"{time_str}\" hour=\"{hour_str}\" year=\"{year_str}\" month=\"{month_str}\" weekday=\"{weekday_str}\" author=\"{author}\" tags=\"{tags}\">\n{source}\n</ecrit>\n",)
     }).reduce(|acc, item| acc + item.as_str()).unwrap_or_default();
@@ -278,7 +285,7 @@ pub async fn list_pages(mut script_data: Cli) {
     };
 
     if params.txm {
-        params.info = vec![
+        params.info = [
             "url",
             "wikidotInfo.title",
             "wikidotInfo.rating",
@@ -286,8 +293,7 @@ pub async fn list_pages(mut script_data: Cli) {
             "wikidotInfo.children.url",
             "wikidotInfo.createdAt",
             "wikidotInfo.createdBy.name",
-        ]
-        .into_iter()
+        ].into_iter()
         .map(|s| s.to_string())
         .collect();
         params.content = true;
@@ -315,10 +321,15 @@ pub async fn list_pages(mut script_data: Cli) {
         panic!("Unreachable code")
     };
 
+    let html_folder = params.download_html.as_ref().map(Path::new);
+    if html_folder.is_some_and(|folder| !folder.is_dir()) {
+        panic!("--download-html: path given isn't a folder path or it doesn't exist.");
+    }
+
     let formatted_info =
         _generate_crom_information_query(params.info.iter().map(|s| s.as_str()).collect());
 
-    let result: Vec<Value> = list_pages_subscript(&script_data, params, formatted_info).await;
+    let result: Vec<Value> = list_pages_subscript(&script_data, params, html_folder, formatted_info).await;
 
     println!("{} result(s) found.", result.len());
 

@@ -1,106 +1,101 @@
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::io;
 use std::io::Write;
+use std::path::Path;
+use std::time::Duration;
 use chromiumoxide::{Browser, BrowserConfig};
+use chromiumoxide::browser::HeadlessMode;
 use crate::cli::{Cli, OutputFormat};
-use futures_util::future::join_all;
-use futures_util::{FutureExt, StreamExt};
+use futures_util::future::{join_all, try_join_all, JoinAll, TryJoinAll};
+use futures_util::{FutureExt, StreamExt, TryFuture};
 use reqwest::header::USER_AGENT;
 use rpassword::read_password;
 use scraper::{ElementRef, Html, Selector};
 use serde::{Serialize};
 use serde_json::Value;
 use tokio::task::JoinHandle;
+use tokio_stream::Iter;
 
 async fn _wait_for_ratelimit(client: &reqwest::Client, crom_url: &str) {
-    let mut retries = 0;
-    let rate_limit_request = "query {rateLimit{remaining, resetAt}}";
+    const RATE_LIMIT_REQUEST: &str = "query {rateLimit{remaining, resetAt}}";
 
     loop {
-        let response = loop {
-            assert!(retries < 5, "Too many failed attemps: giving up.");
-            let response = client
-                .post(crom_url)
-                .header(USER_AGENT, "ScpScriptAnthology/1.0")
-                .json(&serde_json::json!({"query": rate_limit_request}))
-                .send()
-                .await;
-
-            match response {
-                Ok(r) => break r,
-                Err(e) => {
-                    eprintln!("Request error: {e}.");
-                    retries += 1;
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                }
-            }
-        };
-
-        retries = 0;
+        let response = retry_async(5, Some(Duration::from_secs(10)), async ||
+            client
+            .post(crom_url)
+            .header(USER_AGENT, "ScpScriptAnthology/1.0")
+            .json(&serde_json::json!({"query": RATE_LIMIT_REQUEST}))
+            .send()
+            .await
+            .inspect_err(|e| eprintln!("Request error: {e}."))
+        ).await.expect("Too many failed attempts: giving up.");
 
         let json_res: Value = response
             .json()
             .await
-            .expect("Recieved data is not JSON? Error");
+            .expect("Recieved data is not JSON?");
 
         let remaining = json_res.get("data").and_then(|data| {
-            data.get("rateLimit").and_then(|ratelimit| {
-                ratelimit
-                    .get("remaining")
-                    .and_then(|remaining| remaining.as_u64())
-            })
+            data.get("rateLimit")
+                .and_then(|ratelimit| ratelimit.get("remaining"))
+                .and_then(Value::as_u64)
         });
 
         match (remaining, json_res.get("errors")) {
             (Some(0), _) => {
                 println!("Rate limited by Crom. Waiting 5 minutes.");
-                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                tokio::time::sleep(Duration::from_secs(300)).await;
             }
             (None, Some(errors)) => {
                 eprintln!("Warning: Crom might be flooded! Waiting 30 seconds.\n{errors}");
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
                 eprintln!("Retrying.");
             }
             (None, None) => panic!(
                 "No ratelimit nor errors founds in CROM response: {}",
-                json_res.to_string()
+                json_res
             ),
             _ => break, // Not rate limited
         }
     }
 }
 
+#[derive(Debug)]
+struct CromError {
+    errors: String
+}
+
+impl Display for CromError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.errors)
+    }
+}
+
+impl Error for CromError {}
+
 pub async fn query_crom(request: &String) -> Value {
-    let crom_url = "https://api.crom.avn.sh/graphql";
-    let mut retries = 0;
+    const CROM_URL: &str = "https://api.crom.avn.sh/graphql";
     let client = reqwest::Client::new();
-    loop {
-        _wait_for_ratelimit(&client, &crom_url).await;
-        let res: Value = loop {
-            assert!(retries < 5, "Too many failed attemps: giving up.");
-            let response = client
-                .post(crom_url)
-                .header(USER_AGENT, "ScpScriptAnthology/1.0")
-                .json(&serde_json::json!({"query": request}))
-                .send()
-                .await;
-            match response {
-                Err(e) => {
-                    eprintln!("Request error: {e}. Retrying in 10 seconds.");
-                    retries += 1;
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                }
-                Ok(response) => {
-                    break response.json().await.expect("Recieved data is not JSON?");
-                }
-            }
-        };
+    retry_async(5, Some(Duration::from_secs(10)), async || {
+        _wait_for_ratelimit(&client, CROM_URL).await;
+        let res: Value = client
+            .post(CROM_URL)
+            .header(USER_AGENT, "ScpScriptAnthology/1.0")
+            .json(&serde_json::json!({"query": request}))
+            .send().await
+            .inspect_err(|e| eprintln!("Request error: {e}. Retrying in 10 seconds."))?
+            .json().await
+            .inspect_err(|e| eprintln!("Recieved data is not in JSON? {e} Retrying in 10 seconds."))?;
 
         if let Some(errors) = res.get("errors") {
             eprintln!("Crom returned error(s): {errors}. Retrying.");
+            Err(Box::<dyn Error>::from(CromError { errors: errors.to_string() }))
         } else {
-            break res;
+            Ok(res)
         }
-    }
+    }).await
+        .expect("Too many failed attempts: giving up.")
 }
 
 /// Exctracts the main content of a Wikidot webpage
@@ -136,21 +131,11 @@ fn _parse_content(doc: &Html) -> Option<String> {
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct File {
     pub name: String,
     pub file_type: String,
     pub size: i32
-}
-
-impl Into<Value> for File {
-    fn into(self) -> Value {
-        let mut obj = serde_json::Map::new();
-        obj.insert("name".to_string(), Value::String(self.name));
-        obj.insert("file_type".to_string(), Value::String(self.file_type));
-        obj.insert("size".to_string(), Value::Number(self.size.into()));
-        Value::Object(obj)
-    }
 }
 
 fn _parse_file_size(str: &str) -> f32 {
@@ -180,7 +165,7 @@ pub fn file_list(doc: &Html) -> Vec<File> {
     file_list.children().filter_map(ElementRef::wrap).map(|line| {
         let cells = line.children().filter_map(ElementRef::wrap).collect::<Vec<_>>();
         File {
-            name : cells.get(0)
+            name : cells.first()
                 .and_then(|cell| cell.children().filter_map(ElementRef::wrap).next())
                 .map(|cell| cell.inner_html())
                 .unwrap_or(String::new()),
@@ -207,7 +192,7 @@ async fn _download_webpage(url: &str) -> Option<String> {
                 retries = 0;
             }
             i if i <= 5 => {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 retries += 1;
             }
             _ => {
@@ -247,7 +232,7 @@ pub async fn download_webpage_browser(url: &str, browser: &Browser) -> Option<St
         let mut youre_taking_too_long = 30;
         loop {
             youre_taking_too_long -= 1;
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
             // If the action area has content
             if !page.find_element("#action-area").await?.find_elements("a").await?.is_empty() || youre_taking_too_long == 0 {
                 break;
@@ -259,16 +244,10 @@ pub async fn download_webpage_browser(url: &str, browser: &Browser) -> Option<St
         let html = page.wait_for_navigation().await?.content().await?;
         page.close().await?;
 
-        Ok::<_, Box<dyn std::error::Error>>(html)
+        Ok::<_, Box<dyn Error>>(html)
     };
 
-    match f().await {
-        Ok(r) => Some(r),
-        Err(e) => {
-            eprintln!("Warning: couldn't download with browser page. Cause: {e}.");
-            None
-        }
-    }
+    f().await.inspect_err(|e| eprintln!("Warning: couldn't download with browser page. Cause: {e}.")).ok()
 }
 
 fn _list_children(page: &Value) -> Vec<&Value> {
@@ -277,7 +256,7 @@ fn _list_children(page: &Value) -> Vec<&Value> {
         .and_then(|children| children.as_array())
         .map(|children| {
             children
-                .into_iter()
+                .iter()
                 .filter(|child| {
                     child
                         .get("url")
@@ -298,11 +277,12 @@ async fn _crom_pages(
     requested_data: String,
     gather_fragments_sources: bool,
     download_content: bool,
+    download_pages: Option<&Path>,
     get_files: bool,
     browser: Option<&Browser>,
     after: Option<&str>,
 ) -> Vec<Value> {
-    let query = _build_crom_query(&site, &filter, &author, &requested_data, &after);
+    let query = _build_crom_query(site, &filter, &author, &requested_data, &after);
     let response = query_crom(&query).await;
     if verbose {
         println!("Query: {query}");
@@ -317,16 +297,16 @@ async fn _crom_pages(
             } else {
                 data.get("pages")
             }
-        ).expect(format!("Error in JSON response from CROM: {}\nQuery: {query}", response).as_str());
+        ).unwrap_or_else(|| panic!("Error in JSON response from CROM: {}\nQuery: {query}", response));
 
     let mut pages: Vec<Value> = response_parsed
         .get("edges")
         .and_then(|edges| edges.as_array())
-        .expect(format!("Error in JSON response from CROM: {}", response_parsed).as_str())
+        .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", response_parsed))
         .iter()
         .map(|edge| {
             edge.get("node")
-                .expect(format!("Error in JSON response from CROM: {}", edge).as_str())
+                .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", edge))
                 .clone()
         })
         .inspect(|page| {
@@ -339,10 +319,10 @@ async fn _crom_pages(
         })
         .collect();
 
-    if gather_fragments_sources || download_content || get_files {
+    if gather_fragments_sources || download_content || get_files || download_pages.is_some() {
         join_all(
             pages.iter_mut().map(|page| {
-                _add_new_data(verbose, gather_fragments_sources, download_content, get_files, browser, page)
+                _add_new_data(verbose, gather_fragments_sources, download_content, download_pages, get_files, browser, page)
             }),
         )
         .await;
@@ -350,18 +330,18 @@ async fn _crom_pages(
 
     let page_info = response_parsed
         .get("pageInfo")
-        .expect(format!("Error in JSON response from CROM: {}", response_parsed).as_str());
+        .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", response_parsed));
 
     let has_next_page = page_info
         .get("hasNextPage")
         .and_then(|has_next_page| has_next_page.as_bool())
-        .expect(format!("Error in JSON response from CROM: {}", page_info).as_str());
+        .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", page_info));
 
     if has_next_page {
         let next_page = page_info
             .get("endCursor")
             .and_then(|end_cursor| end_cursor.as_str())
-            .expect(format!("Error in JSON response from CROM: {}", page_info).as_str());
+            .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", page_info));
         pages
             .into_iter()
             .chain(
@@ -373,6 +353,7 @@ async fn _crom_pages(
                     requested_data,
                     gather_fragments_sources,
                     download_content,
+                    download_pages,
                     get_files,
                     browser,
                     Some(next_page),
@@ -389,6 +370,7 @@ async fn _add_new_data(
     verbose: bool,
     gather_fragments_sources: bool,
     download_content: bool,
+    download_pages: Option<&Path>,
     get_files: bool,
     browser: Option<&Browser>,
     page: &mut Value,
@@ -420,34 +402,47 @@ async fn _add_new_data(
             .reduce(|collector, part| collector + "\n" + part.as_str());
     }
 
-    if download_content || get_files {
+    if download_content || get_files || download_pages.is_some() {
         let pages = _download_entry(page, children, browser).await;
-        if let Some(html) = pages.get(0).map(|s| Html::parse_document(s.as_str())) {
-            if download_content {
-                let newcontent = _parse_content(&html).unwrap_or(String::new());
-                page.as_object_mut().unwrap().insert("content".to_string(), Value::String(newcontent));
-            }
 
-            if get_files {
-                let file_list: Vec<Value> = file_list(&html).into_iter().map(|x| x.into()).collect();
-                page.as_object_mut().unwrap().insert("files".to_string(), Value::Array(file_list));
-            }
+        if let Some(path) = download_pages {
+            /* TODO: rewrite this mess */
+            let page_url_title = page.get("url")
+                .unwrap()
+                .as_str().unwrap()
+                .split("/").nth(3)
+                .unwrap();
+            let mut f = std::fs::File::create([path.to_str().unwrap(), "/", page_url_title, ".html"].concat()).unwrap();
+            f.write_all(pages.join("\n").as_ref()).unwrap();
+        }
 
-        } else {
-            eprintln!("Warning: could not download or parse content for page {}.", page);
+        if download_content || get_files {
+            if let Some(html) = pages.first().map(|s| Html::parse_document(s.as_str())) {
+                if download_content {
+                    let newcontent = _parse_content(&html).unwrap_or_default();
+                    page.as_object_mut().unwrap().insert("content".to_string(), Value::String(newcontent));
+                }
+
+                if get_files {
+                    let file_list = file_list(&html);
+                    page.as_object_mut().unwrap().insert("files".to_string(), serde_json::to_value(file_list).unwrap());
+                }
+
+            } else {
+                eprintln!("Warning: could not download or parse content for page {}.", page);
+            }
         }
     }
 
     /* Done last to avoid creating a mutable reference to the page before
     now possible because the "children" reference won't be used anymore */
-    if let Some(newsource) = newsource {
-        if let Some(oldsource) = page
-            .get_mut("wikidotInfo")
+    if let (Some(newsource), Some(oldsource)) = (
+        newsource,
+        page.get_mut("wikidotInfo")
             .and_then(|wikidot_info| wikidot_info.as_object_mut())
             .and_then(|wikidot_info| wikidot_info.get_mut("source"))
-        {
-            *oldsource = Value::String(newsource.to_string());
-        }
+    ) {
+        *oldsource = Value::String(newsource.to_string());
     }
 }
 
@@ -508,13 +503,8 @@ async fn _gather_fragment_source(verbose: bool, fragment: &&Value) -> String {
         .and_then(|wi| wi.get("source"))
         .and_then(|source| source.as_str())
         .map(|source| source.to_string())
-        .expect(
-            format!(
-                "Error in JSON response from CROM while querying a fragment {}",
-                fragment.get("url").unwrap()
-            )
-            .as_str(),
-        )
+        .unwrap_or_else(|| panic!("Error in JSON response from CROM while querying a fragment {}",
+                fragment.get("url").unwrap()))
 }
 
 fn _build_crom_query(
@@ -562,8 +552,13 @@ fn _build_crom_query(
     }
 }
 
-pub async fn open_browser() -> (Browser, JoinHandle<()>) {
-    let (browser, mut handler) = Browser::launch(BrowserConfig::builder().build().expect("Failed to build a Browser to get the files"))
+pub async fn open_browser(headless: bool) -> (Browser, JoinHandle<()>) {
+    let (browser, mut handler) = Browser::launch(
+        BrowserConfig::builder()
+            .headless_mode(if headless {HeadlessMode::True} else {HeadlessMode::False})
+            .build()
+            .expect("Failed to build a Browser to get the files")
+    )
         .await.expect("Failed to launch a Browser to get the files");
     let handler = tokio::task::spawn(async move {
         while let Some(h) = handler.next().await {
@@ -608,10 +603,11 @@ pub async fn pages(
     requested_data: String,
     gather_fragments_sources: bool,
     download_content: bool,
+    download_html: Option<&Path>,
     get_files: bool,
 ) -> Vec<Value> {
 
-    let browser_handler = if get_files { Some(open_browser().await) } else { None };
+    let browser_handler = if get_files { Some(open_browser(false).await) } else { None };
 
     let result = _crom_pages(
         verbose,
@@ -621,6 +617,7 @@ pub async fn pages(
         requested_data,
         gather_fragments_sources,
         download_content,
+        download_html,
         get_files,
         browser_handler.as_ref().map(|(browser, _)| browser),
         None,
@@ -663,7 +660,7 @@ pub async fn download_html(
                 eprintln!("Request error: {e}. Retrying in 2 seconds.");
                 //dbg!(e);
                 retries += 1;
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             } else {
                 break Err(e);
@@ -684,4 +681,64 @@ pub fn write_out<T: Serialize>(script_data: Cli, result: &Vec<T>) {
                 .expect("Error writing into output file");
         }
     }
+}
+
+#[allow(unused)]
+pub trait FutureIterator<F: Future>: Sized + Iterator<Item = F> {
+    fn into_future_iter(self) -> Iter<Self> {
+        tokio_stream::iter(self)
+    }
+
+    fn join_all(self) -> JoinAll<F> {
+        join_all(self)
+    }
+}
+
+#[allow(unused)]
+pub trait TryFutureIterator<F: TryFuture>: FutureIterator<F> {
+    fn try_join_all(self) -> TryJoinAll<F> {
+        try_join_all(self)
+    }
+}
+
+impl<I: Iterator<Item = F>, F: Future> FutureIterator<F> for I {}
+impl<I: Iterator<Item = F>, F: TryFuture> TryFutureIterator<F> for I {}
+
+#[allow(unused)]
+pub trait TryIterator<R, E>: Sized + Iterator<Item = Result<R, E>> {
+    fn stable_try_collect<C: FromIterator<R> + Default>(mut self) -> Result<C, E> {
+        let error = self.find(|r| r.is_err());
+        error.map(|r| r.map(|_| C::default()))
+            .unwrap_or_else(|| self.collect())
+    }
+
+    fn partition_errors<C: FromIterator<R>, X: FromIterator<E>>(self) -> (C, X) {
+        let (oks, errs): (Vec<_>, Vec<_>) = self.partition(|r| r.is_ok());
+        (oks.into_iter().filter_map(Result::ok).collect(), errs.into_iter().filter_map(Result::err).collect())
+    }
+}
+
+impl<R, E, I: Sized + Iterator<Item = Result<R, E>>> TryIterator<R, E> for I {}
+
+#[allow(unused)]
+fn retry<O, E>(retries: usize, f: impl Fn() -> Result<O, E>) -> Result<O, E> {
+    let res = f();
+    if retries == 0 || res.is_ok() {
+        res
+    } else {
+        retry(retries - 1, f)
+    }
+}
+
+#[allow(unused)]
+async fn retry_async<O, E>(mut retries: usize, sleep: Option<Duration>, f: impl AsyncFn() -> Result<O, E>) -> Result<O, E> {
+    let mut res = f().await;
+    while retries > 0 && res.is_err() {
+        if let Some(dur) = sleep {
+            tokio::time::sleep(dur).await;
+        }
+        retries -= 1;
+        res = f().await;
+    }
+    res
 }

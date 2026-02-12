@@ -11,13 +11,12 @@ pub enum Branch {
 }
 
 impl Branch {
-    pub fn get_url(&self) -> String {
+    pub fn get_url(&self) -> &'static str {
         match self {
             Self::FR => "http://fondationscp.wikidot.com/",
             Self::EN => "http://scp-wiki.wikidot.com/",
             Self::INT => "http://scp-int.wikidot.com/",
         }
-        .to_string()
     }
 }
 

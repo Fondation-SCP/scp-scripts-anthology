@@ -1,15 +1,13 @@
 use crate::cli::{Cli, Script};
 use crate::common_tools;
-use crate::common_tools::download_html;
+use crate::common_tools::{download_html, FutureIterator};
 use clap::Parser;
 use futures_util::StreamExt;
-use futures_util::future::join_all;
 use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
 use serde::Serialize;
 use std::iter;
 use std::sync::Arc;
-use std::vec::IntoIter;
 
 #[derive(Parser)]
 #[command(version = "0.1.0")]
@@ -65,7 +63,7 @@ fn _get_page_nb(doc: &Html) -> i32 {
         .unwrap_or(1)
 }
 
-async fn _get_threads(client: Arc<reqwest::Client>, url: String, site: String) -> IntoIter<Thread> {
+async fn _get_threads(client: Arc<reqwest::Client>, url: String, site: String) -> impl IntoIterator<Item=Thread> {
     let doc = download_html(client.as_ref(), url.as_str(), 5)
         .await
         .expect("Too many failed attempts");
@@ -80,8 +78,7 @@ async fn _get_threads(client: Arc<reqwest::Client>, url: String, site: String) -
             let sel_posts = Selector::parse(".posts").unwrap();
             let sel_author = Selector::parse(".started .printuser a").unwrap();
             Thread {
-                title: title
-                    .and_then(|link| Some(link.inner_html()))
+                title: title.map(|link| link.inner_html())
                     .expect("No title for a forum thread.")
                     .trim()
                     .to_string(),
@@ -96,15 +93,13 @@ async fn _get_threads(client: Arc<reqwest::Client>, url: String, site: String) -
                         .0,
                 description: doc
                     .select(&sel_desc)
-                    .next()
-                    .and_then(|desc| Some(desc.inner_html()))
+                    .next().map(|desc| desc.inner_html())
                     .unwrap_or_default()
                     .trim()
                     .to_string(),
                 date: doc
                     .select(&sel_date)
-                    .next()
-                    .and_then(|date| Some(date.inner_html()))
+                    .next().map(|date| date.inner_html())
                     .unwrap_or_default(),
                 posts_nb: doc
                     .select(&sel_posts)
@@ -112,16 +107,12 @@ async fn _get_threads(client: Arc<reqwest::Client>, url: String, site: String) -
                     .and_then(|posts| posts.inner_html().parse().ok())
                     .unwrap_or(-1),
                 author: doc
-                    .select(&sel_author)
-                    .skip(1)
-                    .next()
-                    .and_then(|author| Some(author.inner_html()))
+                    .select(&sel_author).nth(1).map(|author| author.inner_html())
                     .unwrap_or_default(),
                 messages: Vec::new(),
             }
         })
-        .collect::<Vec<_>>()
-        .into_iter()
+        .collect::<Box<[_]>>()
 }
 
 fn _parse_messages_rec(post_container: ElementRef) -> Message {
@@ -135,7 +126,7 @@ fn _parse_messages_rec(post_container: ElementRef) -> Message {
         .next()
         .or({
             skip += 1;
-            post_container.select(&sel_containers).skip(0).next()
+            post_container.select(&sel_containers).nth(1)
         })
         .expect("No post in a post container.");
 
@@ -147,27 +138,21 @@ fn _parse_messages_rec(post_container: ElementRef) -> Message {
     Message {
         title: message
             .select(&sel_title)
-            .next()
-            .and_then(|title| Some(title.inner_html()))
-            .unwrap_or(String::new())
+            .next().map(|title| title.inner_html())
+            .unwrap_or_default()
             .trim()
             .to_string(),
         date: message
             .select(&sel_date)
-            .next()
-            .and_then(|title| Some(title.inner_html()))
+            .next().map(|title| title.inner_html())
             .unwrap_or("Unknown date".to_string()),
         author: message
-            .select(&sel_author)
-            .skip(1)
-            .next()
-            .and_then(|title| Some(title.inner_html()))
+            .select(&sel_author).nth(1).map(|title| title.inner_html())
             .unwrap_or("(account deleted)".to_string()),
         content: message
             .select(&sel_content)
-            .next()
-            .and_then(|title| Some(title.inner_html()))
-            .unwrap_or(String::new())
+            .next().map(|title| title.inner_html())
+            .unwrap_or_default()
             .trim()
             .to_string(),
         answers: message
@@ -189,16 +174,14 @@ async fn _get_messages(client: Arc<reqwest::Client>, mut thread: Thread) -> Thre
     let full_doc = Html::parse_fragment(
         iter::once(doc)
             .chain(
-                join_all(
-                    (1..=pages_nb)
-                        .map(|i| format!("{}/p/{i}", thread.url))
-                        .map(async |url| {
-                            download_html(client.as_ref(), url.as_str(), 5)
-                                .await
-                                .expect("Too many failed attempts")
-                        }),
-                )
-                .await,
+                (1..=pages_nb)
+                    .map(|i| format!("{}/p/{i}", thread.url))
+                    .map(async |url| {
+                        download_html(client.as_ref(), url.as_str(), 5)
+                            .await
+                            .expect("Too many failed attempts")
+                })
+                .join_all().await
             )
             .fold(String::new(), |acc, doc| {
                 acc + doc
@@ -235,25 +218,23 @@ async fn _category_dl(
         .expect("Too many failed attempts");
     let pages_nb = _get_page_nb(&doc);
 
-    let futures = (1..pages_nb + 1)
+    let threads = (1..pages_nb + 1)
         .map(|i| format!("{}/p/{i}", category.url))
-        .map(|page| _get_threads(client.clone(), page, site.clone()));
-
-    let threads = tokio_stream::iter(futures)
+        .map(|page| _get_threads(client.clone(), page, site.clone()))
+        .into_future_iter()
         .buffer_unordered(max_threads)
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .flatten()
-        .collect::<Vec<_>>();
+        .collect::<Box<[_]>>();
 
     println!("Threads found: {}", threads.len());
 
-    let futures = threads
+    let threads = threads
         .into_iter()
-        .map(|thread| _get_messages(client.clone(), thread));
-
-    let threads = tokio_stream::iter(futures)
+        .map(|thread| _get_messages(client.clone(), thread))
+        .into_future_iter()
         .buffer_unordered(max_threads)
         .collect::<Vec<_>>()
         .await;
@@ -301,23 +282,17 @@ pub async fn forum_dl(data: Cli) {
     let sel_posts = Selector::parse(".posts").unwrap();
     let groups = doc.select(&sel_group);
     let categories: Vec<_> = groups
-        .map(|group| {
+        .flat_map(|group| {
             group.select(&sel_tr).skip(1).map(|tr| Category {
                 name: tr
                     .select(&sel_title)
-                    .next()
-                    .and_then(|title| Some(title.inner_html()))
-                    .expect(
-                        format!("Can't find title for a category: {}", tr.inner_html()).as_str(),
-                    ),
+                    .next().map(|title| title.inner_html())
+                    .unwrap_or_else(|| panic!("Can't find title for a category: {}", tr.inner_html())),
                 url: url.clone()
                     + tr.select(&sel_title)
                         .next()
                         .and_then(|title| title.attr("href"))
-                        .expect(
-                            format!("Can't find title for a category: {}", tr.inner_html())
-                                .as_str(),
-                        )
+                        .unwrap_or_else(|| panic!("Can't find title for a category: {}", tr.inner_html()))
                         .strip_prefix("/")
                         .expect("Category URL is not relative (but it should be).")
                         .rsplit_once('/')
@@ -336,17 +311,14 @@ pub async fn forum_dl(data: Cli) {
                 threads: Vec::new(),
             })
         })
-        .flatten()
         .collect();
 
     println!("Categories found: {}", categories.len());
 
-    let futures = categories
+    let categories = categories
         .into_iter()
         .map(|category| _category_dl(client.clone(), category, url.clone(), data.threads))
-        .collect::<Vec<_>>();
-
-    let categories = tokio_stream::iter(futures)
+        .into_future_iter()
         .buffer_unordered(1)
         .collect::<Vec<_>>()
         .await;

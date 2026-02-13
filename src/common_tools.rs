@@ -1,105 +1,22 @@
-use std::error::Error;
-use std::fmt::{Display, Formatter};
-use std::io;
-use std::io::Write;
-use std::path::Path;
-use std::time::Duration;
-use chromiumoxide::{Browser, BrowserConfig};
-use chromiumoxide::browser::HeadlessMode;
 use crate::cli::{Cli, OutputFormat};
+use chromiumoxide::browser::HeadlessMode;
+use chromiumoxide::{Browser, BrowserConfig};
 use futures_util::future::{join_all, try_join_all, JoinAll, TryJoinAll};
 use futures_util::{FutureExt, StreamExt, TryFuture};
 use reqwest::header::USER_AGENT;
 use rpassword::read_password;
 use scraper::{ElementRef, Html, Selector};
-use serde::{Serialize};
-use serde_json::Value;
+use serde::Serialize;
+use std::error::Error;
+use std::io;
+use std::io::Write;
+use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_stream::Iter;
 
-async fn _wait_for_ratelimit(client: &reqwest::Client, crom_url: &str) {
-    const RATE_LIMIT_REQUEST: &str = "query {rateLimit{remaining, resetAt}}";
-
-    loop {
-        let response = retry_async(5, Some(Duration::from_secs(10)), async ||
-            client
-            .post(crom_url)
-            .header(USER_AGENT, "ScpScriptAnthology/1.0")
-            .json(&serde_json::json!({"query": RATE_LIMIT_REQUEST}))
-            .send()
-            .await
-            .inspect_err(|e| eprintln!("Request error: {e}."))
-        ).await.expect("Too many failed attempts: giving up.");
-
-        let json_res: Value = response
-            .json()
-            .await
-            .expect("Recieved data is not JSON?");
-
-        let remaining = json_res.get("data").and_then(|data| {
-            data.get("rateLimit")
-                .and_then(|ratelimit| ratelimit.get("remaining"))
-                .and_then(Value::as_u64)
-        });
-
-        match (remaining, json_res.get("errors")) {
-            (Some(0), _) => {
-                println!("Rate limited by Crom. Waiting 5 minutes.");
-                tokio::time::sleep(Duration::from_secs(300)).await;
-            }
-            (None, Some(errors)) => {
-                eprintln!("Warning: Crom might be flooded! Waiting 30 seconds.\n{errors}");
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                eprintln!("Retrying.");
-            }
-            (None, None) => panic!(
-                "No ratelimit nor errors founds in CROM response: {}",
-                json_res
-            ),
-            _ => break, // Not rate limited
-        }
-    }
-}
-
-#[derive(Debug)]
-struct CromError {
-    errors: String
-}
-
-impl Display for CromError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.errors)
-    }
-}
-
-impl Error for CromError {}
-
-pub async fn query_crom(request: &String) -> Value {
-    const CROM_URL: &str = "https://api.crom.avn.sh/graphql";
-    let client = reqwest::Client::new();
-    retry_async(5, Some(Duration::from_secs(10)), async || {
-        _wait_for_ratelimit(&client, CROM_URL).await;
-        let res: Value = client
-            .post(CROM_URL)
-            .header(USER_AGENT, "ScpScriptAnthology/1.0")
-            .json(&serde_json::json!({"query": request}))
-            .send().await
-            .inspect_err(|e| eprintln!("Request error: {e}. Retrying in 10 seconds."))?
-            .json().await
-            .inspect_err(|e| eprintln!("Recieved data is not in JSON? {e} Retrying in 10 seconds."))?;
-
-        if let Some(errors) = res.get("errors") {
-            eprintln!("Crom returned error(s): {errors}. Retrying.");
-            Err(Box::<dyn Error>::from(CromError { errors: errors.to_string() }))
-        } else {
-            Ok(res)
-        }
-    }).await
-        .expect("Too many failed attempts: giving up.")
-}
 
 /// Exctracts the main content of a Wikidot webpage
-fn _parse_content(doc: &Html) -> Option<String> {
+pub fn parse_content(doc: &Html) -> Option<String> {
     let page_content_sel = Selector::parse("#page-content").unwrap();
     let Some(doc) = doc.select(&page_content_sel).next() else {
         eprintln!("#page-content not found.");
@@ -182,7 +99,7 @@ pub fn file_list(doc: &Html) -> Vec<File> {
 }
 
 /// Downloads a singular webpage.
-async fn _download_webpage(url: &str) -> Option<String> {
+pub(crate) async fn _download_webpage(url: &str) -> Option<String> {
     /* Downloading html */
     let mut retries = -1;
     let client = reqwest::Client::new();
@@ -250,307 +167,7 @@ pub async fn download_webpage_browser(url: &str, browser: &Browser) -> Option<St
     f().await.inspect_err(|e| eprintln!("Warning: couldn't download with browser page. Cause: {e}.")).ok()
 }
 
-fn _list_children(page: &Value) -> Vec<&Value> {
-    page.get("wikidotInfo")
-        .and_then(|wikidotinfo| wikidotinfo.get("children"))
-        .and_then(|children| children.as_array())
-        .map(|children| {
-            children
-                .iter()
-                .filter(|child| {
-                    child
-                        .get("url")
-                        .and_then(|url| url.as_str())
-                        .is_some_and(|url| url.contains("fragment:"))
-                })
-                .rev()
-                .collect()
-        })
-        .unwrap_or_default()
-}
 
-async fn _crom_pages(
-    verbose: bool,
-    site: &String,
-    filter: Option<String>,
-    author: Option<&String>,
-    requested_data: String,
-    gather_fragments_sources: bool,
-    download_content: bool,
-    download_pages: Option<&Path>,
-    get_files: bool,
-    browser: Option<&Browser>,
-    after: Option<&str>,
-) -> Vec<Value> {
-    let query = _build_crom_query(site, &filter, &author, &requested_data, &after);
-    let response = query_crom(&query).await;
-    if verbose {
-        println!("Query: {query}");
-        println!("Response: {response}");
-    }
-    let response_parsed = response.get("data")
-        .and_then(|data|
-            /* Response structure is different if querying for a specific user or generally */
-            if author.is_some() {
-                data.get("user")
-                    .and_then(|user| user.get("attributedPages"))
-            } else {
-                data.get("pages")
-            }
-        ).unwrap_or_else(|| panic!("Error in JSON response from CROM: {}\nQuery: {query}", response));
-
-    let mut pages: Vec<Value> = response_parsed
-        .get("edges")
-        .and_then(|edges| edges.as_array())
-        .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", response_parsed))
-        .iter()
-        .map(|edge| {
-            edge.get("node")
-                .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", edge))
-                .clone()
-        })
-        .inspect(|page| {
-            println!(
-                "{}",
-                page.get("url")
-                    .and_then(|url| url.as_str())
-                    .unwrap_or("Invalid URL")
-            )
-        })
-        .collect();
-
-    if gather_fragments_sources || download_content || get_files || download_pages.is_some() {
-        join_all(
-            pages.iter_mut().map(|page| {
-                _add_new_data(verbose, gather_fragments_sources, download_content, download_pages, get_files, browser, page)
-            }),
-        )
-        .await;
-    }
-
-    let page_info = response_parsed
-        .get("pageInfo")
-        .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", response_parsed));
-
-    let has_next_page = page_info
-        .get("hasNextPage")
-        .and_then(|has_next_page| has_next_page.as_bool())
-        .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", page_info));
-
-    if has_next_page {
-        let next_page = page_info
-            .get("endCursor")
-            .and_then(|end_cursor| end_cursor.as_str())
-            .unwrap_or_else(|| panic!("Error in JSON response from CROM: {}", page_info));
-        pages
-            .into_iter()
-            .chain(
-                Box::pin(_crom_pages(
-                    verbose,
-                    site,
-                    filter,
-                    author,
-                    requested_data,
-                    gather_fragments_sources,
-                    download_content,
-                    download_pages,
-                    get_files,
-                    browser,
-                    Some(next_page),
-                ))
-                .await,
-            )
-            .collect()
-    } else {
-        pages
-    }
-}
-
-async fn _add_new_data(
-    verbose: bool,
-    gather_fragments_sources: bool,
-    download_content: bool,
-    download_pages: Option<&Path>,
-    get_files: bool,
-    browser: Option<&Browser>,
-    page: &mut Value,
-) {
-    assert!(
-        page.is_object(),
-        "Error in JSON response from CROM (not an object): {}",
-        page
-    );
-    let children: Vec<_> = if gather_fragments_sources {
-        _list_children(page)
-    } else {
-        Vec::new()
-    };
-    let mut newsource = None;
-    if gather_fragments_sources
-        && page
-        .get("wikidotInfo")
-        .and_then(|wikidot_info| wikidot_info.get("source"))
-        .is_some()
-    {
-        newsource = join_all(
-            children
-                .iter()
-                .map(|fragment| _gather_fragment_source(verbose, fragment)),
-        )
-            .await
-            .into_iter()
-            .reduce(|collector, part| collector + "\n" + part.as_str());
-    }
-
-    if download_content || get_files || download_pages.is_some() {
-        let pages = _download_entry(page, children, browser).await;
-
-        if let Some(path) = download_pages {
-            /* TODO: rewrite this mess */
-            let page_url_title = page.get("url")
-                .unwrap()
-                .as_str().unwrap()
-                .split("/").nth(3)
-                .unwrap();
-            let mut f = std::fs::File::create([path.to_str().unwrap(), "/", page_url_title, ".html"].concat()).unwrap();
-            f.write_all(pages.join("\n").as_ref()).unwrap();
-        }
-
-        if download_content || get_files {
-            if let Some(html) = pages.first().map(|s| Html::parse_document(s.as_str())) {
-                if download_content {
-                    let newcontent = _parse_content(&html).unwrap_or_default();
-                    page.as_object_mut().unwrap().insert("content".to_string(), Value::String(newcontent));
-                }
-
-                if get_files {
-                    let file_list = file_list(&html);
-                    page.as_object_mut().unwrap().insert("files".to_string(), serde_json::to_value(file_list).unwrap());
-                }
-
-            } else {
-                eprintln!("Warning: could not download or parse content for page {}.", page);
-            }
-        }
-    }
-
-    /* Done last to avoid creating a mutable reference to the page before
-    now possible because the "children" reference won't be used anymore */
-    if let (Some(newsource), Some(oldsource)) = (
-        newsource,
-        page.get_mut("wikidotInfo")
-            .and_then(|wikidot_info| wikidot_info.as_object_mut())
-            .and_then(|wikidot_info| wikidot_info.get_mut("source"))
-    ) {
-        *oldsource = Value::String(newsource.to_string());
-    }
-}
-
-/// Downloads all pages referenced by an entry (page + eventual children).
-async fn _download_entry(page: &Value, children: Vec<&Value>, browser: Option<&Browser>) -> Vec<String> {
-    let title = page
-        .get("wikidotInfo")
-        .and_then(|wikidotinfo| wikidotinfo.get("title"));
-    if let Some(title) = title {
-        println!("Downloading webpage(s) of {title}");
-    }
-
-    // Merges the two ways of downloading in a single function to avoid duplicate code later.
-    let download_webpage = async |url| {
-        if let Some(browser) = browser {
-            download_webpage_browser(url, browser).await
-        } else {
-            _download_webpage(url).await
-        }
-    };
-
-    if !children.is_empty() {
-        let newcontent = join_all(children.iter().map(async |fragment| {
-            download_webpage(fragment.get("url").unwrap().as_str().unwrap()).await
-        }))
-        .await;
-        if newcontent.iter().any(|frag| frag.is_none()) {
-            eprintln!("Warning: some fragments for page {} could not be downloaded or parsed.", page);
-        }
-        newcontent
-    } else {
-        vec![download_webpage(page.get("url").unwrap().as_str().unwrap()).await]
-    }.into_iter().map(|x| x.unwrap_or(String::new())).collect() // Changes None Strings to empty Strings
-}
-
-async fn _gather_fragment_source(verbose: bool, fragment: &&Value) -> String {
-    let query = &format!(
-        "
-                        query {{
-                            page(url:{}){{
-                                wikidotInfo {{ source }}
-                            }}
-                        }}
-                   ",
-        fragment.get("url").unwrap()
-    );
-    if verbose {
-        println!("Query: {query}");
-    }
-    let response = query_crom(query).await;
-    if verbose {
-        println!("Response: {response}");
-    }
-    response
-        .get("data")
-        .and_then(|d| d.get("page"))
-        .and_then(|p| p.get("wikidotInfo"))
-        .and_then(|wi| wi.get("source"))
-        .and_then(|source| source.as_str())
-        .map(|source| source.to_string())
-        .unwrap_or_else(|| panic!("Error in JSON response from CROM while querying a fragment {}",
-                fragment.get("url").unwrap()))
-}
-
-fn _build_crom_query(
-    site: &String,
-    filter: &Option<String>,
-    author: &Option<&String>,
-    requested_data: &String,
-    after: &Option<&str>,
-) -> String {
-    let query_body = format!(
-        "edges {{
-          node {{ {requested_data} }}
-        }},
-        pageInfo {{
-          endCursor,
-          hasNextPage
-        }}"
-    );
-    let wikidot_info_filter = match filter {
-        Some(filter) => format!("wikidotInfo: {filter},"),
-        None => "".to_string(),
-    };
-    let after_query = match after {
-        Some(after) => format!("after: \"{after}\","),
-        None => "".to_string(),
-    };
-
-    match *author {
-        None => format!(
-            "query {{
-                pages( {after_query} filter: {{ {wikidot_info_filter} url:{{startsWith:\"{site}\"}}}}) {{
-                    {query_body}
-                }}
-            }}"
-        ),
-        Some(author) => format!(
-            "query {{\
-                user(name: \"{author}\") {{
-                    attributedPages( {after_query} filter: {{ {wikidot_info_filter} url: {{startsWith: \"{site}\"}} }}) {{
-                        {query_body}
-                    }}
-                }}
-            }}"
-        )
-    }
-}
 
 pub async fn open_browser(headless: bool) -> (Browser, JoinHandle<()>) {
     let (browser, mut handler) = Browser::launch(
@@ -595,41 +212,7 @@ pub async fn close_browser((browser, handle): (Browser, JoinHandle<()>)) {
     handle.await.unwrap_or_default();
 }
 
-pub async fn pages(
-    verbose: bool,
-    site: &String,
-    filter: Option<String>,
-    author: Option<&String>,
-    requested_data: String,
-    gather_fragments_sources: bool,
-    download_content: bool,
-    download_html: Option<&Path>,
-    get_files: bool,
-) -> Vec<Value> {
 
-    let browser_handler = if get_files { Some(open_browser(false).await) } else { None };
-
-    let result = _crom_pages(
-        verbose,
-        site,
-        filter,
-        author,
-        requested_data,
-        gather_fragments_sources,
-        download_content,
-        download_html,
-        get_files,
-        browser_handler.as_ref().map(|(browser, _)| browser),
-        None,
-    )
-    .await;
-
-    if let Some(browser_handler) = browser_handler {
-        close_browser(browser_handler).await;
-    }
-
-    result
-}
 
 pub fn xml_escape(s: &str) -> String {
     s.replace("&", "&amp;")
@@ -670,7 +253,7 @@ pub async fn download_html(
     }
 }
 
-pub fn write_out<T: Serialize>(script_data: Cli, result: &Vec<T>) {
+pub fn write_out<T: Serialize>(script_data: Cli, result: &[T]) {
     match script_data.output_format {
         OutputFormat::JSON => {
             serde_json::to_writer_pretty(script_data.output, &result)
@@ -731,7 +314,7 @@ fn retry<O, E>(retries: usize, f: impl Fn() -> Result<O, E>) -> Result<O, E> {
 }
 
 #[allow(unused)]
-async fn retry_async<O, E>(mut retries: usize, sleep: Option<Duration>, f: impl AsyncFn() -> Result<O, E>) -> Result<O, E> {
+pub(crate) async fn retry_async<O, E>(mut retries: usize, sleep: Option<Duration>, f: impl AsyncFn() -> Result<O, E>) -> Result<O, E> {
     let mut res = f().await;
     while retries > 0 && res.is_err() {
         if let Some(dur) = sleep {

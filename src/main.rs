@@ -5,7 +5,6 @@ mod list_pages;
 mod list_files;
 
 use crate::forum_dl::forum_dl;
-use crate::list_pages::list_pages;
 use clap::Parser;
 use cli::Cli;
 use cli::Script;
@@ -20,7 +19,7 @@ async fn main() {
     }
 
     match args.script {
-        Script::ListPages(_) => list_pages(args).await,
+        Script::ListPages(_) => list_pages::run(args).await,
         Script::ForumDl(_) => forum_dl(args).await,
         Script::ListFiles(_) => list_files(args).await,
     }

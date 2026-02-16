@@ -17,5 +17,5 @@ futures-util = "0.3.31"
 tokio-stream = "0.1.17"
 serde = { version = "1.0.217", features = ["derive"] }
 spider_chrome = "2.37.120"
-rpassword = "7.4.0"
 itertools = "0.14.0"
+lazy_static = "1.5.0"

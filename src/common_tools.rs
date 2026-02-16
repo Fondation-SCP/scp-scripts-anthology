@@ -4,12 +4,9 @@ use chromiumoxide::{Browser, BrowserConfig};
 use futures_util::future::{join_all, try_join_all, JoinAll, TryJoinAll};
 use futures_util::{FutureExt, StreamExt, TryFuture};
 use reqwest::header::USER_AGENT;
-use rpassword::read_password;
 use scraper::{ElementRef, Html, Selector};
 use serde::Serialize;
 use std::error::Error;
-use std::io;
-use std::io::Write;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_stream::Iter;
@@ -23,13 +20,11 @@ pub fn parse_content(doc: &Html) -> Option<String> {
         return None;
     };
 
-    let deletion_selectors = vec![
+    let deletion_selectors = [
         Selector::parse(".creditRate"),
         Selector::parse(".code"),
         Selector::parse(".footer-wikiwalk-nav"),
-    ]
-        .into_iter()
-        .map(|selector| selector.unwrap());
+    ].into_iter().map(Result::unwrap);
 
     let delete_element =
         |collector: String, element: ElementRef| collector.replace(&element.html(), "");
@@ -55,90 +50,74 @@ pub struct File {
     pub size: i32
 }
 
-fn _parse_file_size(str: &str) -> f32 {
-    let mut parts = str.split(" ");
-    parts.next().unwrap_or_else(|| {eprintln!("Can't split file size."); ""}).parse::<f32>().map(|size|
-        size * match parts.next() {
-            Some("kB") => 1000.,
-            Some("MB") => 10000000.,
-            Some("Bytes") => 1.,
-            Some(u) => {
-                eprintln!("Unknown unit {u}.");
-                1.
-            },
-            None => {
-                eprintln!("No unit found: {str}");
-                1.
-            }
-    }).unwrap_or_else(|err| {eprintln!("Can't parse size: {str}: {err}."); 0.})
-}
-
-pub fn file_list(doc: &Html) -> Vec<File> {
-    let file_list_selector = Selector::parse("table.page-files tbody").unwrap();
-    let Some(file_list) = doc.select(&file_list_selector).next() else {
-        return vec![]; // No files
-    };
-
-    file_list.children().filter_map(ElementRef::wrap).map(|line| {
-        let cells = line.children().filter_map(ElementRef::wrap).collect::<Vec<_>>();
-        File {
-            name : cells.first()
+impl File {
+    pub fn parse(line: ElementRef) -> Self {
+        let mut cells = line.children().filter_map(ElementRef::wrap);
+        const _GET_STR: fn(Option<ElementRef>) -> String = |cell|
+            cell
                 .and_then(|cell| cell.children().filter_map(ElementRef::wrap).next())
                 .map(|cell| cell.inner_html())
-                .unwrap_or(String::new()),
-            file_type : cells.get(1)
-                .and_then(|cell| cell.children().filter_map(ElementRef::wrap).next())
-                .map(|cell| cell.inner_html())
-                .unwrap_or(String::new()),
-            size: cells.get(2)
-                .map(|cell| _parse_file_size(cell.inner_html().trim()))
+                .unwrap_or(String::new());
+        Self {
+            name : _GET_STR(cells.next()),
+            file_type : _GET_STR(cells.next()),
+            size: cells.next().as_ref()
+                .map(ElementRef::inner_html)
+                .as_deref()
+                .map(str::trim)
+                .map(_parse_file_size)
                 .unwrap_or(0.).round() as i32,
         }
-    }).collect()
+    }
+}
 
+fn _parse_file_size(str: &str) -> f32 {
+    let Some((n, unit)) = str.split_once(" ") else {
+        eprintln!("Can't split file size.");
+        return 0.;
+    };
+
+    let Ok(n) = n.parse::<f32>() else {
+        eprintln!("Can't parse size: {str}.");
+        return 0.;
+    };
+
+    n * match unit {
+        "kB" => 1000.,
+        "MB" => 10000000.,
+        "Bytes" => 1.,
+        u => {
+            eprintln!("Unknown unit {u}.");
+            1.
+        }
+    }
+}
+
+pub fn file_list(doc: &Html) -> Box<[File]> {
+    let file_list_selector = Selector::parse("table.page-files tbody").unwrap();
+    let Some(file_list) = doc.select(&file_list_selector).next() else {
+        return Box::new([]); // No files
+    };
+
+    file_list.children().filter_map(ElementRef::wrap).map(File::parse).collect()
 }
 
 /// Downloads a singular webpage.
-pub(crate) async fn _download_webpage(url: &str) -> Option<String> {
+pub(crate) async fn download_webpage(url: &str) -> Option<String> {
     /* Downloading html */
-    let mut retries = -1;
     let client = reqwest::Client::new();
-    loop {
-        match retries {
-            -1 => {
-                retries = 0;
-            }
-            i if i <= 5 => {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                retries += 1;
-            }
-            _ => {
-                eprintln!("Error while downloading {url}: 5 failed attempts. Giving up.");
-                break None;
-            }
-        }
 
-        let response = match client
+    retry_async(5, Some(Duration::from_secs(5)), async || {
+        let response = client
             .get(url)
             .header(USER_AGENT, "ScpScriptAnthology/1.0")
             .send()
             .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("Download error: {e}.");
-                continue;
-            }
-        };
+            .inspect_err(|e| eprintln!("Download error: {e}. Retrying in 5 seconds."))?;
 
-        match response.text().await {
-            Ok(h) => break Some(h),
-            Err(e) => {
-                eprintln!("Format error: {e}.");
-                continue;
-            }
-        }
-    }
+        response.text().await
+            .inspect_err(|e| eprintln!("Download error: {e}. Retrying in 5 seconds."))
+    }).await.inspect_err(|_| eprintln!("Too many failures, giving up.")).ok()
 }
 
 pub async fn download_webpage_browser(url: &str, browser: &Browser) -> Option<String> {
@@ -184,23 +163,6 @@ pub async fn open_browser(headless: bool) -> (Browser, JoinHandle<()>) {
             }
         }
     });
-    let mut username = String::new();
-    print!("Wikidot username: ");
-    io::stdout().flush().unwrap();
-    io::stdin().read_line(&mut username).expect("Failed to read the username.");
-    username = username.trim().to_string();
-    print!("Password:");
-    io::stdout().flush().unwrap();
-    let password = read_password().expect("Failed to read the password.").trim().to_string();
-
-    let page = browser.new_page("https://www.wikidot.com/default--flow/login__LoginPopupScreen").await
-        .expect("Can't connect to wikidot login page.");
-    let fields = page.find_elements("input").await.unwrap();
-
-    fields[0].click().await.unwrap().type_str(username).await.unwrap();
-    fields[1].click().await.unwrap().type_str(password).await.unwrap();
-    page.find_element("button").await.unwrap().click().await.unwrap();
-    page.wait_for_navigation().await.unwrap();
     (browser, handler)
 }
 
@@ -215,21 +177,23 @@ pub async fn close_browser((browser, handle): (Browser, JoinHandle<()>)) {
 
 
 pub fn xml_escape(s: &str) -> String {
-    s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&apos;")
+    const ESC: [(&str, &str); 5] = [
+        ("&", "&amp;"),
+        ("<", "&lt;"),
+        (">", "&gt;"),
+        ("\"", "&quot;"),
+        ("'", "&apos;"),
+    ];
+    ESC.into_iter().fold(s.to_string(), |acc, (source, cible)| acc.replace(source, cible))
 }
 
 pub async fn download_html(
     client: &reqwest::Client,
     url: &str,
-    max_retries: i32,
+    max_retries: usize,
 ) -> Result<Html, reqwest::Error> {
-    let mut retries = 0;
-    loop {
-        let response = client
+    retry_async(max_retries, Some(Duration::from_secs(2)), async || {
+        client
             .get(url)
             .header(USER_AGENT, "ScpScriptsAnthology/1.0")
             .send()
@@ -237,20 +201,10 @@ pub async fn download_html(
                 Ok(r) => r.text().await,
                 Err(e) => Err(e),
             })
-            .await;
-        if let Err(e) = response {
-            if retries < max_retries {
-                eprintln!("Request error: {e}. Retrying in 2 seconds.");
-                //dbg!(e);
-                retries += 1;
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            } else {
-                break Err(e);
-            }
-        }
-        break Ok(Html::parse_document(response?.as_str()));
-    }
+            .await
+            .inspect_err(|e| eprintln!("Request error: {e}. Retrying in 2 seconds."))
+    }).await
+        .map(|s| Html::parse_document(s.as_str()))
 }
 
 pub fn write_out<T: Serialize>(script_data: Cli, result: &[T]) {
@@ -302,16 +256,6 @@ pub trait TryIterator<R, E>: Sized + Iterator<Item = Result<R, E>> {
 }
 
 impl<R, E, I: Sized + Iterator<Item = Result<R, E>>> TryIterator<R, E> for I {}
-
-#[allow(unused)]
-fn retry<O, E>(retries: usize, f: impl Fn() -> Result<O, E>) -> Result<O, E> {
-    let res = f();
-    if retries == 0 || res.is_ok() {
-        res
-    } else {
-        retry(retries - 1, f)
-    }
-}
 
 #[allow(unused)]
 pub(crate) async fn retry_async<O, E>(mut retries: usize, sleep: Option<Duration>, f: impl AsyncFn() -> Result<O, E>) -> Result<O, E> {

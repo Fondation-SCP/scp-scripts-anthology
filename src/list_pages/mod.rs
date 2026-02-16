@@ -8,7 +8,6 @@ use crate::list_pages::crom::{Crom, QueryTree};
 use chromiumoxide::Browser;
 use chrono::DateTime;
 pub(crate) use cli::ListPagesParameters;
-use futures_util::future::join_all;
 use futures_util::{stream, StreamExt};
 use regex::{Regex, RegexBuilder};
 use scraper::Html;
@@ -16,6 +15,7 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::Path;
 use std::{fs, io};
+use itertools::Itertools;
 
 pub async fn run(mut script_data: Cli) {
     let Script::ListPages(params) = &mut script_data.script else {
@@ -54,16 +54,16 @@ pub async fn run(mut script_data: Cli) {
 
 fn _txm_output(mut output: impl Write, data: &[Value]) -> Result<(), io::Error> {
     let body = data.iter().map(|page| {
-        let source = xml_escape(page.get("content").and_then(|content| content.as_str()).unwrap_or_else(|| panic!("Content absent but --txm used (internal error): {page}")));
+        let source = xml_escape(page.get("content").and_then(Value::as_str).unwrap_or_else(|| panic!("Content absent but --txm used (internal error): {page}")));
         let wikidotinfo = page.get("wikidotInfo").unwrap_or_else(|| panic!("No wikidotInfo in data: {page}"));
-        let title = xml_escape(wikidotinfo.get("title").and_then(|title| title.as_str()).unwrap_or_else(|| panic!("No title in data: {page}")));
-        let rating = wikidotinfo.get("rating").and_then(|rating| rating.as_i64()).unwrap_or_else(|| panic!("No rating in data: {page}"));
+        let title = xml_escape(wikidotinfo.get("title").and_then(Value::as_str).unwrap_or_else(|| panic!("No title in data: {page}")));
+        let rating = wikidotinfo.get("rating").and_then(Value::as_i64).unwrap_or_else(|| panic!("No rating in data: {page}"));
         let tags = xml_escape(wikidotinfo.get("tags").unwrap_or_else(|| panic!("No tags in data but --txm used (internal error): {page}"))
             .as_array().unwrap_or_else(|| panic!("tags is no array: {page}"))
             .iter().map(|tag| tag.as_str().unwrap_or_default().to_string())
             .reduce(|acc, tag| acc + "," + tag.as_str()).unwrap_or_default().as_str());
         let date = wikidotinfo.get("createdAt")
-            .and_then(|date| date.as_str())
+            .and_then(Value::as_str)
             .and_then(|date_str| DateTime::parse_from_rfc3339(date_str).ok())
             .unwrap_or_else(|| panic!("date bad format: {page}"));
         let date_str = date.format("%Y-%m-%d").to_string();
@@ -74,17 +74,17 @@ fn _txm_output(mut output: impl Write, data: &[Value]) -> Result<(), io::Error> 
         let hour_str = date.format("%H").to_string();
         let author = xml_escape(wikidotinfo.get("createdBy")
             .and_then(|cb| cb.get("name"))
-            .and_then(|name| name.as_str())
+            .and_then(Value::as_str)
             .unwrap_or_else(|| panic!("No author in data: {page}")));
 
-        format!("<ecrit title=\"{title}\" rating=\"{rating}\" date=\"{date_str}\" time=\"{time_str}\" hour=\"{hour_str}\" year=\"{year_str}\" month=\"{month_str}\" weekday=\"{weekday_str}\" author=\"{author}\" tags=\"{tags}\">\n{source}\n</ecrit>\n",)
-    }).reduce(|acc, item| acc + item.as_str()).unwrap_or_default();
+        format!("<ecrit title=\"{title}\" rating=\"{rating}\" date=\"{date_str}\" time=\"{time_str}\" hour=\"{hour_str}\" year=\"{year_str}\" month=\"{month_str}\" weekday=\"{weekday_str}\" author=\"{author}\" tags=\"{tags}\">\n{source}\n</ecrit>",)
+    }).join("\n");
 
     write!(output, "<?xml version=\"1.0\"?>\n<SCP>\n{body}\n</SCP>")
 }
 
 /// Downloads all pages referenced by an entry (page + eventual children).
-async fn _download_entry(page: &Value, children: Option<&[&Value]>, browser: Option<&Browser>) -> Vec<String> {
+async fn _download_entry(page: &Value, children: Option<&[&Value]>, browser: Option<&Browser>) -> Box<[String]> {
     let title = page
         .get("wikidotInfo")
         .and_then(|wikidotinfo| wikidotinfo.get("title"));
@@ -97,25 +97,26 @@ async fn _download_entry(page: &Value, children: Option<&[&Value]>, browser: Opt
         if let Some(browser) = browser {
             download_webpage_browser(url, browser).await
         } else {
-            common_tools::_download_webpage(url).await
+            common_tools::download_webpage(url).await
         }
     };
 
     if let Some(children) = children {
-        let newcontent = join_all(children.iter().map(async |fragment| {
+        let newcontent = children.iter().map(async |fragment| {
             download_webpage(fragment.get("url").unwrap().as_str().unwrap()).await
-        }))
-            .await;
-        if newcontent.iter().any(|frag| frag.is_none()) {
+        }).join_all().await.into_boxed_slice();
+
+        if newcontent.iter().any(Option::is_none) {
             eprintln!("Warning: some fragments for page {} could not be downloaded or parsed.", page);
         }
         newcontent
     } else {
-        vec![download_webpage(page.get("url").unwrap().as_str().unwrap()).await]
+        Box::new([download_webpage(page.get("url").unwrap().as_str().unwrap()).await])
     }.into_iter().map(|x| x.unwrap_or(String::new())).collect() // Changes None Strings to empty Strings
 }
 
 
+#[derive(Debug)]
 struct ListPages<'a> {
     verbose: bool,
     site: &'a str,
@@ -133,7 +134,7 @@ struct ListPages<'a> {
 }
 
 impl<'a> ListPages<'a> {
-    pub fn new(
+    fn new(
         global_data: &'a Cli,
         script_data: &'a ListPagesParameters,
         download_html: Option<&'a Path>,
@@ -189,32 +190,40 @@ impl<'a> ListPages<'a> {
             get_files: script_data.files,
             source_contains_one: script_data.source_contains_one,
             regexes_in_source,
-            crom: Crom::new()
+            crom: Crom::new(global_data.verbose)
         }
     }
 
-    pub async fn execute(self) -> Box<[Value]> {
+    async fn execute(self) -> Box<[Value]> {
+        if self.verbose {
+            dbg!(&self);
+        }
+
         let browser_handler = if self.get_files { Some(open_browser(false).await) } else { None };
 
-        let _get_next_page = |next_page: Option<Option<String>>| async {
-            let next_page = next_page?;
-            let resp = self._search_crom(&self.crom, next_page.as_deref()).await;
-            let has_next_page = resp.get("pageInfo")
-                .and_then(|page_info| page_info.get("hasNextPage"))
-                .and_then(|has_next_page| has_next_page.as_bool())
-                .is_some_and(|b| b);
-            if has_next_page {
-                let next_page = resp.get("pageInfo")
-                    .and_then(|page_info| page_info.get("endCursor"))
-                    .and_then(|end_cursor| end_cursor.as_str())
-                    .unwrap_or_else(|| panic!("No next page even though hasNextPage: {:?}", next_page))
-                    .to_string();
-                print!("Downloading next page… {next_page}\t\r");
-                io::stdout().flush().unwrap();
-                Some((resp, Some(Some(next_page))))
-            } else {
-                println!("Download finished.");
-                Some((resp, None))
+        const _LOADING: fn(u64) -> String = |i| (0..i).map(move |n| if n+1 == i {"*"} else {"_"}).collect::<Box<[_]>>().concat();
+
+        let _get_next_page = |next_page: Option<Option<String>>| {
+            async {
+                let next_page = next_page?;
+                let resp = self._search_crom(&self.crom, next_page.as_deref()).await;
+                let has_next_page = resp.get("pageInfo")
+                    .and_then(|page_info| page_info.get("hasNextPage"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if has_next_page {
+                    let next_page = resp.get("pageInfo")
+                        .and_then(|page_info| page_info.get("endCursor"))
+                        .and_then(|end_cursor| end_cursor.as_str())
+                        .unwrap_or_else(|| panic!("No next page even though hasNextPage: {:?}", next_page))
+                        .to_string();
+                    print!("Fetching data from Crom… {:_<10}\r", _LOADING(next_page.as_bytes().iter().map(|b| *b as u64).sum::<u64>() % 10));
+                    io::stdout().flush().unwrap();
+                    Some((resp, Some(Some(next_page))))
+                } else {
+                    println!("Download finished.");
+                    Some((resp, None))
+                }
             }
         };
 
@@ -361,7 +370,7 @@ impl<'a> ListPages<'a> {
             let children = Self::_list_children(page);
             children
                 .iter()
-                .map(|fragment| self.crom._get_fragment_source(self.verbose, fragment))
+                .map(|fragment| self.crom._get_fragment_source(fragment))
                 .join_all().await
                 .join("\n")
         };

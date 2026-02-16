@@ -1,3 +1,5 @@
+extern crate core;
+
 mod cli;
 mod common_tools;
 mod forum_dl;

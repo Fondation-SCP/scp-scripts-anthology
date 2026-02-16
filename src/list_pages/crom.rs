@@ -6,14 +6,17 @@ use serde_json::Value;
 
 const CROM_URL: &str = "https://api.crom.avn.sh/graphql";
 
+#[derive(Debug)]
 pub struct Crom {
     client: reqwest::Client,
+    verbose: bool
 }
 
 impl Crom {
-    pub fn new() -> Self {
+    pub fn new(verbose: bool) -> Self {
         Self {
-            client: reqwest::Client::new()
+            client: reqwest::Client::new(),
+            verbose
         }
     }
 
@@ -123,7 +126,7 @@ impl Crom {
         }
     }
 
-    pub async fn _get_fragment_source(&self, verbose: bool, fragment: &Value) -> String {
+    pub async fn _get_fragment_source(&self, fragment: &Value) -> String {
         let query = &format!(
             "
                         query {{
@@ -134,11 +137,11 @@ impl Crom {
                    ",
             fragment.get("url").unwrap()
         );
-        if verbose {
+        if self.verbose {
             println!("Query: {query}");
         }
         let mut response = self.query(query).await;
-        if verbose {
+        if self.verbose {
             println!("Response: {response}");
         }
         response

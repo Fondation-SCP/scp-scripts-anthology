@@ -2,8 +2,13 @@ extern crate core;
 
 mod cli;
 mod common_tools;
+#[cfg(feature = "forum-dl")]
 mod forum_dl;
+
+#[cfg(feature = "list-pages")]
 mod list_pages;
+
+#[cfg(feature = "list-files")]
 mod list_files;
 
 use crate::forum_dl::forum_dl;
@@ -21,8 +26,11 @@ async fn main() {
     }
 
     match args.script {
+        #[cfg(feature = "list-pages")]
         Script::ListPages(_) => list_pages::run(args).await,
+        #[cfg(feature = "forum-dl")]
         Script::ForumDl(_) => forum_dl(args).await,
+        #[cfg(feature = "list-files")]
         Script::ListFiles(_) => list_files(args).await,
     }
 }

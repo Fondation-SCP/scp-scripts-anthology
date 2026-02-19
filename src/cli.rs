@@ -1,4 +1,9 @@
-use crate::{forum_dl, list_files, list_pages};
+#[cfg(feature = "forum-dl")]
+use crate::forum_dl;
+#[cfg(feature = "list-files")]
+use crate::list_files;
+#[cfg(feature = "list-files")]
+use crate::list_pages;
 use clap::Subcommand;
 use clap::{Parser, ValueEnum};
 use clio::Output;
@@ -29,14 +34,17 @@ pub enum OutputFormat {
 #[derive(Subcommand)]
 pub enum Script {
     /// Selects pages with selected criteria and downloads multiple information about them.
+    #[cfg(feature = "list-pages")]
     ListPages(list_pages::ListPagesParameters),
     /// Downloads the forum of a Wikidot wiki.
+    #[cfg(feature = "forum-dl")]
     ForumDl(forum_dl::ForumDlParameters),
     /// Lists the files of selected pages via a ListPages modules located on any Wikidot wiki (does not use Crom).
     ///
     /// You need to have set up a page on the wiki that uses the ListPages module to list all pages
     /// whose files you want to have listed. Put the ListPages module in a div with the class
     /// ssa-list-pages so the script can detect it.
+    #[cfg(feature = "list-files")]
     ListFiles(list_files::ListFilesParameters)
 }
 
